@@ -1,29 +1,39 @@
-# PubMed Summary App
+# Your Research Assistant
 
 ## Overview
 
-The PubMed Summary App is a Streamlit application designed to help users search PubMed for scientific papers and generate summaries of their findings. It uses the Ollama API with the deepseek-r1:8b model to generate search strategies and summarize search results.
+Your Research Assistant is a powerful Streamlit application designed to help researchers efficiently search PubMed for scientific papers and generate intelligent summaries of their findings. It leverages the QwQ-32B reasoning model through the Groq Cloud API to provide high-quality search strategies, comprehensive summaries, and interactive literature analysis.
 
 ## Features
 
-- **PubMed Integration**: Search PubMed for scientific papers
-- **Search Strategy Generation**: Generate PubMed search strategies based on research questions
-- **Advanced Search**: Build complex search queries with Boolean operators and field tags
-- **Filtering**: Filter search results by year and journal
-- **Summarization**: Generate summaries of search results using Ollama
-- **Export**: Download summaries as text files and search results as CSV files
+- **PubMed Integration**: Advanced search functionality for scientific papers
+- **AI-Powered Search Strategy**: Generate optimized PubMed search strategies based on your research questions
+- **Advanced Search Options**: 
+  - Multiple article types selection
+  - Multi-language support
+  - Date range filtering
+  - Journal filtering
+- **Smart Filtering**: Filter search results by year and journal
+- **AI Analysis**:
+  - Generate comprehensive summaries using QwQ-32B reasoning model
+  - "Ask the Literature" feature for specific questions about your papers
+  - Support for both full dataset and latest 10 papers analysis
+- **Export Options**: 
+  - Download summaries as text files
+  - Export search results as CSV files
+  - Save literature analysis results
 
 ## Prerequisites
 
-- [Ollama](https://ollama.ai/) installed locally with the deepseek-r1:8b model
-- Email address for PubMed queries
+- Groq Cloud API key (obtain from [console.groq.com/keys](https://console.groq.com/keys))
+- Email address for PubMed queries (required by NCBI)
 
 ## Installation
 
 1. Clone this repository:
 ```bash
-git clone https://github.com/yourusername/Summary-App.git
-cd Summary-App
+git clone https://github.com/JackXu9/research-assistant.git
+cd research-assistant
 ```
 
 2. Install the required dependencies:
@@ -35,54 +45,75 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 ```
-Then edit the `.env` file with your PubMed email and other configuration options.
-
-4. Make sure Ollama is running with the deepseek-r1:8b model:
-```bash
-ollama run deepseek-r1:8b
-```
+Then edit the `.env` file with your Groq API key and PubMed email.
 
 ## Usage Guide
 
 1. **Start the application**:
 ```bash
-./start_app.sh
-```
-   Or alternatively:
-```bash
-python ssl_bypass.py && streamlit run app.py
+streamlit run app.py
 ```
 
-2. **Define Research Question**:
-   Enter your research question and confirm the Ollama model settings.
+2. **Configure API Access**:
+   - Enter your Groq API key
+   - Provide your email for PubMed searches
 
-3. **PubMed Search**:
-   - Generate a search strategy based on your research question
-   - Or build a search query manually using the advanced search options
-   - Enter your PubMed email and execute the search
+3. **Research Process**:
+   a. **Define Research Question**:
+      - Enter your research question
+      - Get AI-generated search strategy
+   
+   b. **PubMed Search**:
+      - Use the generated strategy or create your own query
+      - Apply filters (article types, languages, date range)
+      - Execute the search
+   
+   c. **Review Results**:
+      - View papers grouped by year
+      - Expand/collapse paper details
+      - Toggle abstracts for detailed review
+   
+   d. **Generate Insights**:
+      - Create full summaries or analyze latest 10 papers
+      - Ask specific questions about the literature
+      - Download generated content
 
-4. **Filter Results**:
-   - Filter the search results by year and journal
-   - View the filtered results in a table
+## Features in Detail
 
-5. **Generate Summary**:
-   - Click the "Summarize Papers" button to generate a summary of the filtered results
-   - The summary will be displayed in the app
+### 1. Search Capabilities
+- Multiple article types (Clinical Trials, Reviews, Meta-Analyses, etc.)
+- Support for 10 languages including English, French, German, Spanish, etc.
+- Custom date range selection
+- Advanced query building with automatic filter integration
 
-6. **Export Results**:
-   - Download the summary as a text file
-   - Download the search results as a CSV file
+### 2. AI Analysis
+- **Summary Generation**: Comprehensive analysis of selected papers
+- **Latest Papers Focus**: Option to analyze most recent 10 papers
+- **Interactive Q&A**: Ask specific questions about the selected papers
+- **Context-Aware**: Summaries consider your research question
 
-## SSL Certificate Issues
-
-The application includes an SSL bypass mechanism to handle certificate verification issues when connecting to PubMed. This is particularly useful on macOS systems where Python may have trouble with SSL certificate verification. The bypass is automatically enabled when you run the application.
+### 3. User Interface
+- Clean, intuitive layout
+- Year-based paper organization
+- Expandable paper details
+- Easy-to-use filtering system
 
 ## Limitations
 
-Note that while the LLM has been prompted to provide accurate summaries, hallucinations can occur. Always double-check the generated summaries against the original papers. The app is intended as a research aid, not a replacement for critical reading and analysis.
+- Free tier allows analysis of up to 10 papers per batch
+- Additional papers require Groq Cloud subscription
+- As with all AI systems, outputs should be verified against source materials
+
+## Security Note
+
+The application handles API keys securely and does not store them permanently. Each user must provide their own Groq API key.
+
+## Support
+
+For issues or questions, please contact: jack.junchi.xu@regionh.dk
 
 ## Acknowledgments
 
-- Built with Streamlit and Ollama
-- Uses the Entrez API for PubMed integration
-- Inspired by the [Ollama-Review-App](https://github.com/chk-AI/Ollama-Review-App) 
+- Built with Streamlit
+- Powered by Groq Cloud and QwQ-32B reasoning model
+- Uses the Entrez API for PubMed integration 
