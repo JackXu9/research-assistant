@@ -1,0 +1,9 @@
+streamlit==1.42.0
+pandas==2.2.3
+biopython==1.85
+python-dotenv==1.0.0
+requests==2.32.3
+certifi>=2024.2.2
+urllib3>=2.0.0
+pyOpenSSL>=23.0.0
+groq>=0.4.2 
