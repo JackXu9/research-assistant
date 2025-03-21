@@ -11,7 +11,7 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 from pubmed_utils import search_pubmed, fetch_details
-from groq_utils import generate_search_strategy, generate_summary, ask_literature
+from groq_utils import generate_search_strategy, generate_summary, ask_literature, get_groq_client
 from search_utils import SearchManager
 import ssl_bypass
 
@@ -27,6 +27,8 @@ if 'filtered_df' not in st.session_state:
     st.session_state.filtered_df = None
 if 'summary' not in st.session_state:
     st.session_state.summary = None
+if 'excluded_pmids' not in st.session_state:
+    st.session_state.excluded_pmids = set()
 
 def reset_app():
     """Reset all session state variables except API key and email"""
@@ -49,6 +51,7 @@ def reset_app():
     st.session_state.unfiltered_df = None
     st.session_state.filtered_df = None
     st.session_state.summary = None
+    st.session_state.excluded_pmids = set()
     
     # Clear specific text input keys
     st.session_state.research_question = ""
@@ -227,67 +230,93 @@ def main():
                 elif not search_query:
                     st.error("Please enter a search query")
                 else:
-                    with st.spinner("Searching PubMed..."):
-                        try:
-                            # Build the base query first
-                            final_query = search_query.strip()
+                    try:
+                        # Build the base query first
+                        final_query = search_query.strip()
+                        
+                        # Store original query for debugging
+                        original_query = final_query
+                        
+                        # Add filters one by one, with proper formatting
+                        filter_components = []
+                        
+                        if selected_languages:
+                            language_filters = [f'{lang}[Language]' for lang in selected_languages]
+                            if len(language_filters) == 1:
+                                filter_components.append(language_filters[0])
+                            else:
+                                filter_components.append(f"({' OR '.join(language_filters)})")
+                        
+                        # Format date with proper syntax
+                        if date_from and date_to:
+                            date_filter = f'{date_from.strftime("%Y/%m/%d")}:{date_to.strftime("%Y/%m/%d")}[Date - Publication]'
+                            filter_components.append(date_filter)
+                        
+                        if selected_article_types:
+                            type_filters = [f'"{at}"[Publication Type]' for at in selected_article_types]
+                            if len(type_filters) == 1:
+                                filter_components.append(type_filters[0])
+                            else:
+                                filter_components.append(f"({' OR '.join(type_filters)})")
+                        
+                        # Add all filters to the query
+                        if filter_components:
+                            final_query = f"({final_query}) AND {' AND '.join(filter_components)}"
+                        
+                        # Remove any extra spaces and normalize
+                        final_query = ' '.join(final_query.split())
+                        
+                        # Add detailed debug output
+                        st.write("Debug Information:")
+                        st.write("1. Original Base Query:", original_query)
+                        st.write("2. Applied Filters:")
+                        if selected_languages:
+                            st.write("   - Language filter:", ' OR '.join(language_filters))
+                        if date_from and date_to:
+                            st.write("   - Date filter:", date_filter)
+                        if selected_article_types:
+                            st.write("   - Article type filter:", ' OR '.join(type_filters))
+                        st.write("3. Final Query:", final_query)
+                        
+                        # Add a link to test the base query without filters
+                        encoded_base_query = original_query.replace(' ', '+')
+                        base_pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/?term={encoded_base_query}"
+                        st.markdown("4. Debug Links:")
+                        st.markdown(f"   - [Test base query without filters]({base_pubmed_url})")
+                        
+                        with st.spinner('Searching PubMed...'):
+                            results, count, warnings, cleaned_query = search_pubmed(final_query, email, retmax=1000, verify_ssl=False)
                             
-                            # Store original query for debugging
-                            original_query = final_query
-                            
-                            # Add filters one by one, with proper formatting
-                            filter_components = []
-                            
-                            if selected_languages:
-                                language_filters = [f'{lang}[Language]' for lang in selected_languages]
-                                if len(language_filters) == 1:
-                                    filter_components.append(language_filters[0])
-                                else:
-                                    filter_components.append(f"({' OR '.join(language_filters)})")
-                            
-                            # Format date with proper syntax
-                            if date_from and date_to:
-                                date_filter = f'{date_from.strftime("%Y/%m/%d")}:{date_to.strftime("%Y/%m/%d")}[Date - Publication]'
-                                filter_components.append(date_filter)
-                            
-                            if selected_article_types:
-                                type_filters = [f'"{at}"[Publication Type]' for at in selected_article_types]
-                                if len(type_filters) == 1:
-                                    filter_components.append(type_filters[0])
-                                else:
-                                    filter_components.append(f"({' OR '.join(type_filters)})")
-                            
-                            # Add all filters to the query
-                            if filter_components:
-                                final_query = f"({final_query}) AND {' AND '.join(filter_components)}"
-                            
-                            # Remove any extra spaces and normalize
-                            final_query = ' '.join(final_query.split())
-                            
-                            # Add detailed debug output
-                            st.write("Debug Information:")
-                            st.write("1. Original Base Query:", original_query)
-                            st.write("2. Applied Filters:")
-                            if selected_languages:
-                                st.write("   - Language filter:", ' OR '.join(language_filters))
-                            if date_from and date_to:
-                                st.write("   - Date filter:", date_filter)
-                            if selected_article_types:
-                                st.write("   - Article type filter:", ' OR '.join(type_filters))
-                            st.write("3. Final Query:", final_query)
-                            
-                            # Add a link to test the base query without filters
-                            encoded_base_query = original_query.replace(' ', '+')
-                            base_pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/?term={encoded_base_query}"
-                            st.markdown("4. Debug Links:")
-                            st.markdown(f"   - [Test base query without filters]({base_pubmed_url})")
-                            
-                            # Execute search with correct parameters
-                            results, count = search_pubmed(final_query, email, retmax=1000, verify_ssl=False)
-                            
+                            if warnings:
+                                with st.expander("⚠️ Search Query Adjustments Found", expanded=True):
+                                    st.markdown("**Original Query:**")
+                                    st.code(final_query)
+                                    st.markdown("**Suggested Changes:**")
+                                    for warning in warnings:
+                                        st.info(warning)
+                                    st.markdown("**Updated Query:**")
+                                    st.code(cleaned_query)
+                                    if st.button("Use Updated Query"):
+                                        st.session_state.search_query = cleaned_query
+                                        st.rerun()
+
+                            if not results:
+                                st.warning(f"No results found for the query: {final_query}")
+                                encoded_query = final_query.replace(' ', '+')
+                                pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/?term={encoded_query}"
+                                st.markdown(f"[Test full query on PubMed]({pubmed_url})")
+                                st.info("""Troubleshooting suggestions:
+1. Try the base query link above without filters first
+2. If the base query works, add filters one at a time
+3. Check if the date range is too restrictive
+4. Verify that the MeSH terms exist in PubMed's vocabulary""")
+                                return
+
+                            # Process results if we have them
                             if results:
                                 # Fetch details for each result
-                                papers = fetch_details(results, email, verify_ssl=False)
+                                with st.spinner('Fetching paper details...'):
+                                    papers = fetch_details(results, email, verify_ssl=False)
                                 
                                 if papers and 'PubmedArticle' in papers:
                                     # Convert to DataFrame
@@ -305,18 +334,8 @@ def main():
                                     st.success(f"Found {len(papers['PubmedArticle'])} papers")
                                 else:
                                     st.warning("No valid paper data returned from PubMed")
-                            else:
-                                st.warning(f"No results found for query: {final_query}")
-                                encoded_query = final_query.replace(' ', '+')
-                                pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/?term={encoded_query}"
-                                st.markdown(f"[Test full query on PubMed]({pubmed_url})")
-                                st.info("""Troubleshooting suggestions:
-        1. Try the base query link above without filters first
-        2. If the base query works, add filters one at a time
-        3. Check if the date range is too restrictive
-        4. Verify that the MeSH terms exist in PubMed's vocabulary""")
-                        except Exception as e:
-                            st.error(f"Error during search: {str(e)}\nQuery: {final_query if 'final_query' in locals() else 'not constructed'}")
+                    except Exception as e:
+                        st.error(f"Error during search: {str(e)}\nQuery: {final_query if 'final_query' in locals() else 'not constructed'}")
 
             # Results and Filtering Section
             if st.session_state.unfiltered_df is not None:
@@ -345,40 +364,20 @@ def main():
                 # Summary Generation (moved to left column)
                 st.header("4. Generate Summary")
                 
-                # Summary buttons in two columns for better spacing
-                sum_col1, sum_col2 = st.columns(2)
-                with sum_col1:
-                    if st.button("Generate Full Summary", use_container_width=True):
-                        if st.session_state.filtered_df is not None and not st.session_state.filtered_df.empty:
-                            with st.spinner("Generating summary..."):
-                                try:
-                                    papers_to_summarize = st.session_state.filtered_df.to_dict('records')
-                                    summary = generate_summary(papers_to_summarize, research_question)
-                                    st.session_state.summary = summary
-                                except Exception as e:
-                                    st.error(f"Error generating summary: {str(e)}")
-                        else:
-                            st.warning("No papers selected for summarization")
+                # Get non-excluded papers
+                included_df = st.session_state.filtered_df[~st.session_state.filtered_df['pmid'].isin(st.session_state.excluded_pmids)]
                 
-                with sum_col2:
-                    if st.button("Summarize Latest 10", use_container_width=True):
-                        if st.session_state.filtered_df is not None and not st.session_state.filtered_df.empty:
-                            with st.spinner("Generating summary of latest 10 papers..."):
-                                try:
-                                    latest_df = st.session_state.filtered_df.copy()
-                                    latest_df['year'] = pd.to_numeric(latest_df['year'], errors='coerce')
-                                    latest_df = latest_df.sort_values('year', ascending=False).head(10)
-                                    
-                                    if not latest_df.empty:
-                                        papers_to_summarize = latest_df.to_dict('records')
-                                        summary = generate_summary(papers_to_summarize, research_question)
-                                        st.session_state.summary = summary
-                                    else:
-                                        st.warning("No valid papers found for summarization")
-                                except Exception as e:
-                                    st.error(f"Error generating summary: {str(e)}")
-                        else:
-                            st.warning("No papers selected for summarization")
+                if st.button("Generate Summary", use_container_width=True):
+                    if not included_df.empty:
+                        with st.spinner("Generating summary..."):
+                            try:
+                                papers_to_summarize = included_df.to_dict('records')
+                                summary = generate_summary(papers_to_summarize, research_question)
+                                st.session_state.summary = summary
+                            except Exception as e:
+                                st.error(f"Error generating summary: {str(e)}")
+                    else:
+                        st.warning("No papers selected for summarization")
                 
                 # Download buttons in two columns
                 down_col1, down_col2 = st.columns(2)
@@ -454,6 +453,82 @@ def main():
             st.header("Search Results")
             df_display = st.session_state.filtered_df.copy()
             
+            # Add AI Filter section
+            st.subheader("AI Filter")
+            ai_filter_criteria = st.text_area(
+                "Enter filter criteria for the AI to analyze abstracts:",
+                placeholder="Example: studies including populations more than 20 participants\nor: randomized controlled trials with follow-up > 6 months",
+                help="The AI will analyze each abstract based on your criteria and filter the results accordingly."
+            )
+            
+            # Initialize AI filtered papers in session state if not exists
+            if 'ai_filtered_pmids' not in st.session_state:
+                st.session_state.ai_filtered_pmids = set()
+            
+            if ai_filter_criteria and st.button("Apply AI Filter"):
+                # Check if API key is available
+                if not st.session_state.get('groq_api_key'):
+                    st.error("Please enter your Groq API key at the top of the page to use the AI filter.")
+                else:
+                    with st.spinner("AI analyzing abstracts..."):
+                        try:
+                            # Initialize Groq client
+                            client = get_groq_client()
+                            
+                            # Prepare the filtering prompt
+                            filter_prompt = f"""Analyze the following abstract and determine if it meets this criteria:
+{ai_filter_criteria}
+
+Respond with ONLY 'yes' or 'no'. If there's not enough information in the abstract to determine, respond with 'no'.
+
+Abstract:
+"""
+                            filtered_pmids = set()
+                            progress_bar = st.progress(0)
+                            total_papers = len(df_display)
+                            
+                            for idx, row in df_display.iterrows():
+                                # Create completion for each abstract
+                                completion = client.chat.completions.create(
+                                    messages=[
+                                        {
+                                            "role": "system",
+                                            "content": "You are a precise scientific paper filter. Analyze abstracts and respond only with 'yes' or 'no' based on the given criteria."
+                                        },
+                                        {
+                                            "role": "user",
+                                            "content": filter_prompt + row['abstract']
+                                        }
+                                    ],
+                                    model="qwen-qwq-32b",
+                                    max_tokens=10,
+                                    temperature=0.1,
+                                )
+                                
+                                response = completion.choices[0].message.content.strip().lower()
+                                if response == 'yes':
+                                    filtered_pmids.add(str(row['pmid']))
+                                
+                                # Update progress bar
+                                progress_bar.progress((idx + 1) / total_papers)
+                            
+                            st.session_state.ai_filtered_pmids = filtered_pmids
+                            
+                            # Show results
+                            if filtered_pmids:
+                                st.success(f"Found {len(filtered_pmids)} papers matching your criteria.")
+                            else:
+                                st.warning("No papers found matching your criteria.")
+                            
+                        except Exception as e:
+                            st.error(f"Error during AI filtering: {str(e)}")
+            
+            # Add button to clear AI filter
+            if st.session_state.ai_filtered_pmids:
+                if st.button("Clear AI Filter"):
+                    st.session_state.ai_filtered_pmids = set()
+                    st.rerun()
+            
             # Group papers by year
             if not df_display.empty:
                 # Convert year to numeric, handling any non-numeric values
@@ -466,13 +541,28 @@ def main():
                 if not unknown_year_papers.empty:
                     with st.expander(f"📅 Unknown Year ({len(unknown_year_papers)} papers)", expanded=True):
                         for _, row in unknown_year_papers.iterrows():
+                            # Skip if AI filter is active and paper doesn't match
+                            if st.session_state.ai_filtered_pmids and str(row['pmid']) not in st.session_state.ai_filtered_pmids:
+                                continue
+                                
                             st.markdown(f"<h3 class='study-title'>{row['title']}</h3>", unsafe_allow_html=True)
                             with st.container():
-                                col1, col2 = st.columns([3, 1])
+                                col1, col2, col3 = st.columns([2.5, 0.8, 0.7])
                                 with col1:
                                     st.write("**Journal:**", row['journal'])
                                 with col2:
                                     st.write("**PMID:**", row['pmid'])
+                                with col3:
+                                    # Add toggle button for excluding/including the paper
+                                    pmid = str(row['pmid'])
+                                    if pmid in st.session_state.excluded_pmids:
+                                        if st.button("➕ Include", key=f"include_{pmid}", type="primary"):
+                                            st.session_state.excluded_pmids.remove(pmid)
+                                            st.rerun()
+                                    else:
+                                        if st.button("❌ Exclude", key=f"exclude_{pmid}"):
+                                            st.session_state.excluded_pmids.add(pmid)
+                                            st.rerun()
                                 
                                 # Add a toggle for the abstract
                                 if st.button(f"Toggle Abstract 🔍", key=f"toggle_{row['pmid']}"):
@@ -489,17 +579,39 @@ def main():
                 for year in years:
                     year_papers = df_display[df_display['year'] == year]
                     
+                    # Count papers that match AI filter if active
+                    if st.session_state.ai_filtered_pmids:
+                        matching_papers = year_papers[year_papers['pmid'].astype(str).isin(st.session_state.ai_filtered_pmids)]
+                        paper_count = len(matching_papers)
+                    else:
+                        paper_count = len(year_papers)
+                    
                     # Create expandable section for each year
-                    with st.expander(f"📅 {int(year)} ({len(year_papers)} papers)", expanded=True):
+                    with st.expander(f"📅 {int(year)} ({paper_count} papers)", expanded=True):
                         # Display each paper within the year group using a cleaner format
                         for _, row in year_papers.iterrows():
+                            # Skip if AI filter is active and paper doesn't match
+                            if st.session_state.ai_filtered_pmids and str(row['pmid']) not in st.session_state.ai_filtered_pmids:
+                                continue
+                                
                             st.markdown(f"<h3 class='study-title'>{row['title']}</h3>", unsafe_allow_html=True)
                             with st.container():
-                                col1, col2 = st.columns([3, 1])
+                                col1, col2, col3 = st.columns([2.5, 0.8, 0.7])
                                 with col1:
                                     st.write("**Journal:**", row['journal'])
                                 with col2:
                                     st.write("**PMID:**", row['pmid'])
+                                with col3:
+                                    # Add toggle button for excluding/including the paper
+                                    pmid = str(row['pmid'])
+                                    if pmid in st.session_state.excluded_pmids:
+                                        if st.button("➕ Include", key=f"include_{pmid}", type="primary"):
+                                            st.session_state.excluded_pmids.remove(pmid)
+                                            st.rerun()
+                                    else:
+                                        if st.button("❌ Exclude", key=f"exclude_{pmid}"):
+                                            st.session_state.excluded_pmids.add(pmid)
+                                            st.rerun()
                                 
                                 # Add a toggle for the abstract
                                 if st.button(f"Toggle Abstract 🔍", key=f"toggle_{row['pmid']}"):

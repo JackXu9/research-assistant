@@ -41,7 +41,7 @@ EXPLANATION:
             }
         ],
         temperature=0.2,
-        max_tokens=2000  # Increased from 500
+        max_tokens=10000  # Increased from 500
     )
     
     response = completion.choices[0].message.content

@@ -9,6 +9,7 @@ pandas DataFrame. It also includes utilities for handling SSL certificate verifi
 import pandas as pd
 import ssl
 import urllib.request
+import re
 from Bio import Entrez
 
 # Create a global unverified SSL context
@@ -29,6 +30,117 @@ def patch_ssl():
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=unverified_context))
     urllib.request.install_opener(opener)
 
+def validate_mesh_term(term, email, verify_ssl=True):
+    """
+    Validates if a term exists as a MeSH term in PubMed.
+    
+    Parameters:
+    -----------
+    term : str
+        The term to validate (without [Mesh] qualifier)
+    email : str
+        Email address for PubMed API usage tracking
+    verify_ssl : bool, default=True
+        Whether to verify SSL certificates
+        
+    Returns:
+    --------
+    tuple
+        (bool, str) - (is_valid, suggested_term)
+        is_valid: True if term exists as MeSH term
+        suggested_term: If found, returns the correct MeSH term, otherwise None
+    """
+    Entrez.email = email
+    
+    if not verify_ssl:
+        patch_ssl()
+    
+    # Remove any [Mesh] qualifier and trim
+    clean_term = term.replace('[Mesh]', '').strip().strip('"')
+    
+    try:
+        # Search in MeSH database
+        handle = Entrez.esearch(db="mesh", term=f"{clean_term}[MESH]", retmax=1)
+        result = Entrez.read(handle)
+        handle.close()
+        
+        if result['Count'] != '0':
+            # Get the correct MeSH term
+            handle = Entrez.efetch(db="mesh", id=result['IdList'][0], rettype="full")
+            mesh_data = handle.read()
+            handle.close()
+            
+            # Extract the descriptor name
+            match = re.search(r'<DescriptorName[^>]*>(.*?)</DescriptorName>', mesh_data)
+            if match:
+                return True, match.group(1)
+            return True, clean_term
+        
+        # If not found, try to find similar terms
+        handle = Entrez.esearch(db="mesh", term=clean_term, retmax=5)
+        suggestions = Entrez.read(handle)
+        handle.close()
+        
+        if suggestions['Count'] != '0':
+            # Get the first suggestion
+            handle = Entrez.efetch(db="mesh", id=suggestions['IdList'][0], rettype="full")
+            mesh_data = handle.read()
+            handle.close()
+            
+            match = re.search(r'<DescriptorName[^>]*>(.*?)</DescriptorName>', mesh_data)
+            if match:
+                return False, match.group(1)
+        
+        return False, None
+        
+    except Exception as e:
+        print(f"Error validating MeSH term '{term}': {str(e)}")
+        return False, None
+
+def clean_search_query(query, email, verify_ssl=True):
+    """
+    Cleans and validates a PubMed search query by checking MeSH terms.
+    
+    Parameters:
+    -----------
+    query : str
+        The search query to clean
+    email : str
+        Email address for PubMed API usage tracking
+    verify_ssl : bool, default=True
+        Whether to verify SSL certificates
+        
+    Returns:
+    --------
+    tuple
+        (str, list) - (cleaned_query, list of warnings/suggestions)
+    """
+    warnings = []
+    
+    # Find all MeSH terms in the query
+    mesh_terms = re.findall(r'"([^"]+)"\[Mesh\]', query)
+    
+    cleaned_parts = query
+    for term in mesh_terms:
+        is_valid, suggestion = validate_mesh_term(term, email, verify_ssl)
+        if not is_valid:
+            if suggestion:
+                warnings.append(f'MeSH term "{term}" not found. Suggested: "{suggestion}"')
+                # Replace invalid MeSH term with suggested one
+                cleaned_parts = cleaned_parts.replace(
+                    f'"{term}"[Mesh]',
+                    f'"{suggestion}"[Mesh]'
+                )
+            else:
+                warnings.append(f'MeSH term "{term}" not found. Using as text search.')
+                # Convert to All Fields search
+                cleaned_parts = cleaned_parts.replace(
+                    f'"{term}"[Mesh]',
+                    f'"{term}"[All Fields]'
+                )
+    
+    return cleaned_parts, warnings
+
 def search_pubmed(query, email, retmax=1000, verify_ssl=True):
     """
     Search PubMed using the given query.
@@ -47,7 +159,7 @@ def search_pubmed(query, email, retmax=1000, verify_ssl=True):
     Returns:
     --------
     tuple
-        A tuple containing (list of PubMed IDs, total count of results).
+        A tuple containing (list of PubMed IDs, total count of results, list of warnings, cleaned_query).
     """
     if not query or not query.strip():
         raise ValueError("Empty search query")
@@ -58,6 +170,9 @@ def search_pubmed(query, email, retmax=1000, verify_ssl=True):
     if not isinstance(retmax, int) or retmax <= 0:
         raise ValueError("retmax must be a positive integer")
     
+    # Clean and validate the query first
+    cleaned_query, warnings = clean_search_query(query, email, verify_ssl)
+    
     Entrez.email = email
     
     # If SSL verification is disabled, patch urllib
@@ -66,26 +181,21 @@ def search_pubmed(query, email, retmax=1000, verify_ssl=True):
     
     try:
         # Clean up the query by removing any double spaces or trailing/leading spaces
-        query = ' '.join(query.split())
+        cleaned_query = ' '.join(cleaned_query.split())
         
         # Print debug information
-        print(f"Executing PubMed search with query: {query}")
+        print(f"Executing PubMed search with query: {cleaned_query}")
         
         handle = Entrez.esearch(
             db="pubmed", 
-            term=query, 
+            term=cleaned_query, 
             retmax=retmax,
-            usehistory='y',  # Use history to handle large result sets
-            retmode='xml'    # Get XML response for better error handling
+            usehistory='y',
+            retmode='xml'
         )
         
         record = Entrez.read(handle, validate=False)
         handle.close()
-        
-        # Print debug information about the response
-        print(f"PubMed response keys: {record.keys()}")
-        if 'Count' in record:
-            print(f"Total results found: {record['Count']}")
         
         if 'ErrorList' in record and record['ErrorList']:
             error_details = []
@@ -97,15 +207,12 @@ def search_pubmed(query, email, retmax=1000, verify_ssl=True):
         pmid_list = record.get("IdList", [])
         count = int(record.get("Count", 0))
         
-        # Print debug information about results
-        print(f"Retrieved {len(pmid_list)} PMIDs out of {count} total results")
-        
-        return pmid_list, count
+        return pmid_list, count, warnings, cleaned_query
         
     except Exception as e:
         print(f"Error in search_pubmed: {str(e)}")
-        print(f"Query that caused error: {query}")
-        raise Exception(f"PubMed search error: {str(e)}\nQuery: {query}")
+        print(f"Query that caused error: {cleaned_query}")
+        raise Exception(f"PubMed search error: {str(e)}\nQuery: {cleaned_query}")
 
 def fetch_details(id_list, email, verify_ssl=True):
     """
