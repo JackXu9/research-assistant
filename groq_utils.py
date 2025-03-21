@@ -20,7 +20,7 @@ def generate_search_strategy(research_question: str) -> str:
     
     prompt = f"""Create a PubMed search strategy for: "{research_question}"
 
-Output ONLY the following format, nothing else:
+Output ONLY the following format in English (do not use any Chinese characters):
 
 SEARCH STRATEGY:
 [PubMed search query with MeSH terms and field tags]
@@ -33,7 +33,7 @@ EXPLANATION:
         messages=[
             {
                 "role": "system",
-                "content": "You are a medical librarian who creates precise PubMed search strategies. Output only the search strategy and brief explanation, no thinking process."
+                "content": "You are a medical librarian who creates precise PubMed search strategies. Output only the search strategy and brief explanation in English, no thinking process or Chinese characters."
             },
             {
                 "role": "user",
@@ -41,17 +41,19 @@ EXPLANATION:
             }
         ],
         temperature=0.2,
-        max_tokens=1500  # Increased from 500
+        max_tokens=2000  # Increased from 500
     )
     
     response = completion.choices[0].message.content
     
-    # Remove any thinking process enclosed in <think> tags
-    response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
+    # Remove any thinking process enclosed in <think> tags and extra spaces
+    response = re.sub(r'<think>.*?</think>\s*', '', response, flags=re.DOTALL)
+    # Remove any leading/trailing whitespace
+    response = response.strip()
     
     return response
 
-def generate_summary(papers, research_question=None):
+def generate_summary(papers, research_question=None, max_batch_size=10):
     """
     Generate a holistic summary of the papers that addresses the research question.
     
@@ -61,6 +63,8 @@ def generate_summary(papers, research_question=None):
         List of dictionaries containing paper information
     research_question : str, optional
         The research question being investigated
+    max_batch_size : int, optional
+        Maximum number of papers to process in one batch (default: 10)
         
     Returns:
     --------
@@ -70,59 +74,93 @@ def generate_summary(papers, research_question=None):
     if not papers:
         return "No papers provided for summarization."
     
-    # Prepare the papers data for the prompt
-    papers_text = "\n\n".join([
-        f"Title: {paper.get('title', 'No title')}\n"
-        f"Abstract: {paper.get('abstract', 'No abstract')}"
-        for paper in papers
-    ])
-    
-    # Construct the prompt
-    context = f"""Research Question: {research_question if research_question else 'Not provided'}
+    def create_summary_prompt(batch_papers):
+        # Prepare the papers data for the prompt
+        papers_text = "\n\n".join([
+            f"Title: {paper.get('title', 'No title')}\n"
+            f"Abstract: {paper.get('abstract', 'No abstract')}"
+            for paper in batch_papers
+        ])
+        
+        return f"""Research Question: {research_question if research_question else 'Not provided'}
 
 Papers to analyze:
 {papers_text}
 
-Based on the above papers, provide a comprehensive analysis with the following structure:
+Based on the above papers, provide a comprehensive analysis with the following structure. Use English only, do not output any Chinese characters:
 
-1. Literature Overview:
-- Synthesize the main findings and themes from the literature
-- Evaluate how well the papers address the research question
-- Identify any consensus or contradictions in the findings
+Overall Summary:
+- Focus on answering the research question directly. If few or no studies answer the research question, state this clearly and provide a very brief overview of what the included studies have investigated.
+- State the level of evidence as one of: "Weak", "Moderate", or "Strong". Elaborate briefly on the type of evidence (e.g., meta-analysis, RCTs, case reports).
 
-2. Knowledge Gaps:
-- Identify areas that are not well addressed in the current literature
-- Point out limitations in the existing research
-- Highlight questions that remain unanswered
+Gaps in Knowledge:
+- Focus specifically on gaps related to the research question.
+- If few or no studies directly answer the research question, explicitly state this.
+- Be concise and specific about what aspects need further investigation.
 
-3. Conclusions:
-- Summarize the key takeaways in relation to the research question
-- Assess the strength of the evidence
-- Suggest directions for future research
+Summary:
+- Provide a synthesis of all knowledge relevant to the research question.
+- If there is insufficient data to support any conclusions, state this clearly.
+- Focus on concrete findings and their implications.
 
-Please ensure each section directly relates to the research question. If the papers do not adequately address the research question, explicitly state this and explain why.
+Please ensure each section directly relates to the research question. Keep the response focused and concise.
+
+If you need to think through your analysis, enclose your thinking process in <think></think> tags.
 """
 
     try:
         client = get_groq_client()
         
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a scientific literature analyst. Provide clear, concise, and structured summaries that focus on addressing the research question."
-                },
-                {
-                    "role": "user",
-                    "content": context
-                }
-            ],
-            model="mixtral-8x7b-32768",
-            max_tokens=3000,
-            temperature=0.3,
-        )
+        # Try with initial batch size
+        current_batch_size = max_batch_size
+        success = False
         
-        return chat_completion.choices[0].message.content
+        while not success and current_batch_size > 0:
+            try:
+                # Take the first n papers
+                batch_papers = papers[:current_batch_size]
+                context = create_summary_prompt(batch_papers)
+                
+                chat_completion = client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a scientific literature analyst. Provide clear, concise, and structured summaries that focus on addressing the research question. Use English only, no Chinese characters. Always maintain the exact structure provided in the prompt."
+                        },
+                        {
+                            "role": "user",
+                            "content": context
+                        }
+                    ],
+                    model="qwen-qwq-32b",
+                    max_tokens=10000,  
+                    temperature=0.2,
+                )
+                
+                summary = chat_completion.choices[0].message.content
+                
+                # Remove any thinking process enclosed in <think> tags and extra spaces
+                summary = re.sub(r'<think>.*?</think>\s*', '', summary, flags=re.DOTALL)
+                # Remove any leading/trailing whitespace
+                summary = summary.strip()
+                
+                # If there are more papers that weren't included in this batch
+                if len(papers) > current_batch_size:
+                    summary += f"\n\nNote: This summary is based on {current_batch_size} most recent papers out of {len(papers)} total papers."
+                
+                success = True
+                return summary
+                
+            except Exception as e:
+                if "context window" in str(e).lower() or "api" in str(e).lower():
+                    # Reduce batch size and try again
+                    current_batch_size -= 1
+                else:
+                    # If it's a different type of error, raise it
+                    raise e
+        
+        if not success:
+            return "Unable to generate summary. The papers may be too long for the model's context window."
         
     except Exception as e:
         raise Exception(f"Error generating summary: {str(e)}")
@@ -174,13 +212,16 @@ def ask_literature(papers, question: str, max_papers: int = 10) -> str:
     # More focused prompt
     context = f"""Question: {question}
 
-Analyze these {len(papers_to_analyze)} most recent papers to answer the question:
+Analyze these {len(papers_to_analyze)} most recent papers to answer the question. Use English only, do not output any Chinese characters:
 {papers_text}
 
 Provide a concise response in this format:
 ANSWER: [Brief, evidence-based answer focusing only on the question asked]
-EVIDENCE: [Key findings from 2-3 most relevant papers]
-LIMITATIONS: [Main limitation in 1-2 sentences]"""
+EVIDENCE: [Key findings from most relevant papers]
+LIMITATIONS: [Main limitation in 1-2 sentences]
+
+If you need to think through your analysis, enclose your thinking process in <think></think> tags.
+"""
 
     try:
         client = get_groq_client()
@@ -189,19 +230,24 @@ LIMITATIONS: [Main limitation in 1-2 sentences]"""
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a focused scientific analyst. Provide brief, evidence-based answers."
+                    "content": "You are a focused scientific analyst. Provide brief, evidence-based answers in English only, no Chinese characters."
                 },
                 {
                     "role": "user",
                     "content": context
                 }
             ],
-            model="mixtral-8x7b-32768",
-            max_tokens=1000,  # Reduced from 2000
-            temperature=0.3,
+            model="qwen-qwq-32b",
+            max_tokens=20000, 
+            temperature=0.2,
         )
         
         response = chat_completion.choices[0].message.content
+        
+        # Remove any thinking process enclosed in <think> tags and extra spaces
+        response = re.sub(r'<think>.*?</think>\s*', '', response, flags=re.DOTALL)
+        # Remove any leading/trailing whitespace
+        response = response.strip()
         
         # Add note about limited analysis
         if len(papers) > max_papers:
