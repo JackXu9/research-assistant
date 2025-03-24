@@ -668,7 +668,29 @@ Return ONLY the revised search query with no explanation or additional text."""
                 
                 # Display summary text area
                 if st.session_state.summary:
-                    st.text_area("Generated Summary:", st.session_state.summary, height=400)
+                    # Format specific sections to be bold using regex
+                    import re
+                    formatted_summary = st.session_state.summary
+                    
+                    # Format the Level of Evidence section
+                    formatted_summary = re.sub(
+                        r'(Level of [Ee]vidence:?|[Ee]vidence [Ll]evel:?|[Ee]vidence [Qq]uality:?)(.*?)(\n|$)', 
+                        r'**\1**\2\3', 
+                        formatted_summary
+                    )
+                    
+                    # Format the Implications or Conclusion section
+                    formatted_summary = re.sub(
+                        r'([Ii]mplications:?|[Cc]onclusions?:?|[Cc]linical [Ii]mplications:?)(.*?)(\n|$)', 
+                        r'**\1**\2\3', 
+                        formatted_summary
+                    )
+                    
+                    # Display the formatted summary
+                    st.markdown(formatted_summary)
+                    
+                    # Keep the original in a hidden text area for download
+                    st.text_area("Original Summary (for download):", st.session_state.summary, height=1, key="hidden_summary", label_visibility="collapsed")
                 
                 # Ask the Literature section
                 st.header("4. Ask the Literature")
@@ -717,36 +739,33 @@ Return ONLY the revised search query with no explanation or additional text."""
             st.header("Search Results")
             df_display = st.session_state.filtered_df.copy()
             
-            # Add a prominent Reset All Filters button at the top
-            reset_col1, reset_col2 = st.columns([1, 1])
-            with reset_col1:
-                if st.button("🔄 Reset All Filters", key="reset_all_filters_btn", use_container_width=True, type="primary"):
-                    # Clear AI filter
-                    st.session_state.ai_filtered_pmids = set()
-                    st.session_state.ai_filter_explanations = {}
-                    
-                    # Reset manual filters (year, journal selections)
-                    # Clear all multiselect filters in the left column
-                    for key in list(st.session_state.keys()):
-                        if key.startswith('Filter by') or key.endswith('multiselect'):
-                            st.session_state[key] = []
-                        
-                    # Reset the filtered_df to the original unfiltered state
-                    if st.session_state.unfiltered_df is not None:
-                        st.session_state.filtered_df = st.session_state.unfiltered_df.copy()
-                    
-                    st.success("All filters have been reset!")
-                    st.rerun()
-            
             # Display articles count
-            with reset_col2:
-                total_articles = len(df_display)
-                if st.session_state.ai_filtered_pmids:
-                    filtered_count = len(st.session_state.ai_filtered_pmids)
-                    st.info(f"Showing {filtered_count} of {total_articles} articles")
-                else:
-                    st.info(f"Showing all {total_articles} articles")
+            total_articles = len(df_display)
+            if st.session_state.ai_filtered_pmids:
+                filtered_count = len(st.session_state.ai_filtered_pmids)
+                st.info(f"Showing {filtered_count} of {total_articles} articles")
+            else:
+                st.info(f"Showing all {total_articles} articles")
+            
+            # Add Reset All Filters button - keep for when filters are applied
+            if st.button("🔄 Reset All Filters", key="reset_all_filters_btn", use_container_width=True):
+                # Clear AI filter
+                st.session_state.ai_filtered_pmids = set()
+                st.session_state.ai_filter_explanations = {}
+                
+                # Reset manual filters (year selections)
+                # Clear all multiselect filters in the left column
+                for key in list(st.session_state.keys()):
+                    if key.startswith('Filter by') or key.endswith('multiselect'):
+                        st.session_state[key] = []
                     
+                # Reset the filtered_df to the original unfiltered state
+                if st.session_state.unfiltered_df is not None:
+                    st.session_state.filtered_df = st.session_state.unfiltered_df.copy()
+                
+                st.success("All filters have been reset!")
+                st.rerun()
+                
             # Add AI Filter section
             st.subheader("AI Filter")
             ai_filter_criteria = st.text_area(
