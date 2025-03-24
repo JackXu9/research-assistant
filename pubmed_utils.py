@@ -97,83 +97,114 @@ def validate_mesh_term(term, email, verify_ssl=True):
         print(f"Error validating MeSH term '{term}': {str(e)}")
         return False, None
 
-def clean_search_query(query, email, verify_ssl=True):
+def clean_search_query(query: str, email: str = None) -> tuple:
     """
-    Cleans and validates a PubMed search query by checking MeSH terms.
+    Clean and validate a PubMed search query.
     
-    Parameters:
-    -----------
-    query : str
-        The search query to clean
-    email : str
-        Email address for PubMed API usage tracking
-    verify_ssl : bool, default=True
-        Whether to verify SSL certificates
-        
+    Args:
+        query (str): The original search query
+        email (str, optional): Email for PubMed API
+    
     Returns:
-    --------
-    tuple
-        (str, list) - (cleaned_query, list of warnings/suggestions)
+        tuple: (cleaned_query, warnings)
     """
     warnings = []
+    original_query = query
     
-    # Check for common date format issues
-    if '[Date - Publication]' in query:
-        # Look for issues with date range formatting
-        date_range_match = re.search(r'AND\s*(\d{4}/\d{2}/\d{2}):(\d{4}/\d{2}/\d{2})\[Date - Publication\]', query)
-        if date_range_match:
-            # Fix missing space before date range
-            if not re.search(r'AND\s+\d{4}/\d{2}/\d{2}', query):
-                query = re.sub(r'AND(\d{4}/\d{2}/\d{2})', r'AND \1', query)
-                warnings.append('Fixed spacing in date range filter')
+    # If query uses OVID/MEDLINE syntax, convert it
+    if any(pattern in query for pattern in ['exp ', '/', '.ti,ab.', '[pt]']):
+        try:
+            query = convert_ovid_to_pubmed(query)
+            warnings.append("OVID/MEDLINE syntax detected and automatically converted to PubMed format")
+        except Exception as e:
+            warnings.append(f"Error converting OVID syntax: {str(e)}")
     
-    # First, automatically detect and convert any OVID/MEDLINE syntax
-    ovid_patterns = ['exp ', '/', '[tiab]', '[pt]']
-    has_ovid_syntax = any(pattern in query for pattern in ovid_patterns)
+    # Fix common date format issues
+    if "[Date - Publication]" in query:
+        # Fix spacing before date ranges
+        query = re.sub(r'(\d{4})/(\d{2})/(\d{2}):', r'\1/\2/\3 :', query)
+        
+        # Fix incorrect date format with year immediately after AND
+        date_year_pattern = re.compile(r'AND\s+(\d{4})\s*\[(?:All Fields|Text Word)\](\d{2}/\d{2}:\d{4}/\d{2}/\d{2}\[Date - Publication\])')
+        if date_year_pattern.search(query):
+            query = date_year_pattern.sub(r'AND \1/\2', query)
+            warnings.append("Fixed date filter being incorrectly treated as MeSH term")
     
-    if has_ovid_syntax:
-        original_query = query
-        query = convert_ovid_to_pubmed(query)
-        if query != original_query:
-            warnings.append(f'OVID/MEDLINE syntax detected and automatically converted to PubMed format')
+    # Additional date format fix: look for year numbers followed by date pattern
+    year_date_pattern = re.compile(r'(\d{4})\s*\[(?:All Fields|Text Word)\](\d{2}/\d{2}:\d{4}/\d{2}/\d{2}\[Date - Publication\])')
+    if year_date_pattern.search(query):
+        query = year_date_pattern.sub(r'\1/\2', query)
+        warnings.append("Fixed date format where year was separated from date range")
     
-    # Find all MeSH terms in the query
-    mesh_terms = re.findall(r'"([^"]+)"\[Mesh\]', query)
+    # Fix another common pattern: YYYY[All Fields]MM/DD:YYYY/MM/DD
+    broken_date_pattern = re.compile(r'(\d{4})\s*\[(?:All Fields|Text Word)\](\d{2}/\d{2}:\d{4}/\d{2}/\d{2}\[Date - Publication\])')
+    if broken_date_pattern.search(query):
+        query = broken_date_pattern.sub(r'\1/\2', query)
+        warnings.append("Corrected broken date format")
+        
+    # Check for AND YYYY[All Fields] pattern
+    year_mesh_pattern = re.compile(r'AND\s+(\d{4})\s*\[(?:All Fields|Text Word|Mesh(?:\:NoExp)?)\]')
+    if year_mesh_pattern.search(query):
+        # Only fix if followed by date pattern
+        date_after = re.search(r'AND\s+(\d{4})\s*\[(?:All Fields|Text Word|Mesh(?:\:NoExp)?)\]([^[]*?\[Date - Publication\])', query)
+        if date_after:
+            year = date_after.group(1)
+            date_part = date_after.group(2)
+            # Replace with proper format
+            fixed_part = f"AND {year}/{date_part}"
+            query = re.sub(r'AND\s+(\d{4})\s*\[(?:All Fields|Text Word|Mesh(?:\:NoExp)?)\]([^[]*?\[Date - Publication\])', fixed_part, query)
+            warnings.append(f"MeSH term \"AND {year}\" not found. Using as text search.")
+            warnings.append("Fixed date filter being incorrectly treated as MeSH term")
     
-    cleaned_parts = query
-    for term in mesh_terms:
-        is_valid, suggestion = validate_mesh_term(term, email, verify_ssl)
-        if not is_valid:
-            if suggestion:
-                warnings.append(f'MeSH term "{term}" not found. Suggested: "{suggestion}"')
-                # Replace invalid MeSH term with suggested one
-                cleaned_parts = cleaned_parts.replace(
-                    f'"{term}"[Mesh]',
-                    f'"{suggestion}"[Mesh]'
-                )
+    # Validate MeSH terms if email is provided
+    if email:
+        # Find all MeSH terms in the query
+        mesh_terms = re.findall(r'"([^"]+)"(?:\s*\[Mesh[^\]]*\])', query)
+        mesh_terms += re.findall(r'([^"\s]+)(?:\s*\[Mesh[^\]]*\])', query)  # Also catch unquoted MeSH terms
+        
+        invalid_terms = []
+        suggestions = {}
+        
+        for term in mesh_terms:
+            # Skip checking YYYY as MeSH
+            if re.match(r'^\d{4}$', term):
+                invalid_terms.append(term)
+                suggestions[term] = None
+                continue
+                
+            try:
+                is_valid, suggestion = validate_mesh_term(term, email, verify_ssl=False)
+                if not is_valid:
+                    invalid_terms.append(term)
+                    suggestions[term] = suggestion
+            except Exception as e:
+                warnings.append(f"Error checking MeSH term '{term}': {str(e)}")
+        
+        # Add warnings for invalid terms
+        for term in invalid_terms:
+            if re.match(r'^\d{4}$', term):
+                warnings.append(f"MeSH term \"{term}\" not found. Using as text search.")
+                # Replace MeSH tag with All Fields
+                query = re.sub(r'"?' + re.escape(term) + r'"?\s*\[Mesh[^\]]*\]', f'"{term}"[All Fields]', query)
+            elif suggestions[term]:
+                warnings.append(f"MeSH term \"{term}\" not found. Did you mean \"{suggestions[term]}\"?")
             else:
-                warnings.append(f'MeSH term "{term}" not found. Using as text search.')
-                # Convert to All Fields search
-                cleaned_parts = cleaned_parts.replace(
-                    f'"{term}"[Mesh]',
-                    f'"{term}"[All Fields]'
-                )
+                warnings.append(f"MeSH term \"{term}\" not found. Using as text search.")
+                # Replace MeSH tag with All Fields
+                query = re.sub(r'"?' + re.escape(term) + r'"?\s*\[Mesh[^\]]*\]', f'"{term}"[All Fields]', query)
     
-    # Clean up any potential date format issues with "AND YYYY"[Mesh:NoExp]
-    if re.search(r'"AND \d{4}"', cleaned_parts):
-        original = cleaned_parts
-        cleaned_parts = re.sub(r'"AND (\d{4})"(\[Mesh:NoExp\])?', r'AND \1', cleaned_parts)
-        if cleaned_parts != original:
-            warnings.append('Fixed date filter being incorrectly treated as MeSH term')
+    # Clean up duplicate date filters
+    date_filters = re.findall(r'\d{4}/\d{2}/\d{2}:\d{4}/\d{2}/\d{2}\[Date - Publication\]', query)
+    if len(date_filters) > 1:
+        # Keep just the first instance
+        query_parts = query.split(date_filters[0])
+        rest_of_query = query_parts[1]
+        for date_filter in date_filters[1:]:
+            rest_of_query = rest_of_query.replace(f" AND {date_filter}", "")
+        query = query_parts[0] + date_filters[0] + rest_of_query
+        warnings.append("Removed duplicate date filters")
     
-    # Add more space before date range if needed
-    if '[Date - Publication]' in cleaned_parts:
-        original = cleaned_parts
-        cleaned_parts = re.sub(r'AND(\d{4}/\d{2}/\d{2})', r'AND \1', cleaned_parts)
-        if cleaned_parts != original:
-            warnings.append('Fixed spacing before date range filter')
-    
-    return cleaned_parts, warnings
+    return query, warnings
 
 def convert_ovid_to_pubmed(query):
     """
@@ -266,7 +297,7 @@ def search_pubmed(query, email, retmax=1000, verify_ssl=True):
         raise ValueError("retmax must be a positive integer")
     
     # Clean and validate the query first
-    cleaned_query, warnings = clean_search_query(query, email, verify_ssl)
+    cleaned_query, warnings = clean_search_query(query, email)
     
     Entrez.email = email
     
