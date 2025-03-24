@@ -15,6 +15,7 @@ from groq_utils import generate_search_strategy, generate_summary, ask_literatur
 from search_utils import SearchManager
 import ssl_bypass
 import re
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -166,11 +167,16 @@ def main():
     with left_col:
         # Add container to control width
         with st.container():
-            # Add API key input at the top of the app
-            groq_api_key = st.text_input("Enter your Groq API Key:", type="password")
-            if groq_api_key:
-                st.session_state.groq_api_key = groq_api_key
-                os.environ["GROQ_API_KEY"] = groq_api_key
+            # Add API key and email inputs at the top of the app
+            col1, col2 = st.columns(2)
+            with col1:
+                groq_api_key = st.text_input("Enter your Groq API Key:", type="password")
+                if groq_api_key:
+                    st.session_state.groq_api_key = groq_api_key
+                    os.environ["GROQ_API_KEY"] = groq_api_key
+            
+            with col2:
+                email = st.text_input("Enter your email (required for PubMed):", key="email")
             
             # Research Question Section
             st.header("1. Define Research Question")
@@ -181,436 +187,446 @@ def main():
             )
             
             if research_question:
-                if st.button("Generate Search Strategy"):
-                    with st.spinner("Generating and validating search strategy..."):
-                        try:
-                            # Get the email for MeSH term validation
-                            email = st.session_state.get('email', '')
-                            
-                            if not email:
-                                st.warning("For best results, please enter your email address in the form below. This will allow the system to validate MeSH terms against PubMed.")
-                                strategy = generate_search_strategy(research_question)
-                                st.session_state.search_manager.current_query = strategy
-                                st.text_area("Generated Search Strategy:", strategy, height=200)
-                            else:
-                                # Generate and validate the search strategy in one step
-                                validated_strategy, validation_notes, was_modified = generate_and_validate_search_strategy(research_question, email)
-                                st.session_state.search_manager.current_query = validated_strategy
-                                
-                                # Display the validated strategy
-                                st.text_area("Generated Search Strategy:", validated_strategy, height=200)
-                                
-                                # Display validation information if terms were modified
-                                if was_modified and validation_notes:
-                                    with st.expander("🔍 MeSH Term Validation Details", expanded=True):
-                                        st.info("The system validated all MeSH terms against the PubMed database and made the following changes:")
-                                        for note in validation_notes:
-                                            st.markdown(f"- {note}")
-                                        st.markdown("These changes ensure your search query will work properly on PubMed.")
-                                        
-                                        # Extract just the validated search query for easy use
-                                        search_query_match = re.search(r'SEARCH STRATEGY:\s*(.*?)(?:\s*EXPLANATION:|$)', validated_strategy, re.DOTALL)
-                                        if search_query_match:
-                                            validated_query = search_query_match.group(1).strip()
-                                            st.markdown("### Validated Search Query:")
-                                            st.code(validated_query)
-                                            
-                                            # Add a "Use this validated query" button
-                                            if st.button("Use this validated query"):
-                                                st.session_state.search_query = validated_query
-                                                st.success("Query applied to the search field below!")
-                                                # Add an automatic scroll hint
-                                                st.markdown("""
-                                                <script>
-                                                    document.getElementById("search_query").scrollIntoView();
-                                                </script>
-                                                """, unsafe_allow_html=True)
-                                
-                        except Exception as e:
-                            st.error(f"Error generating search strategy: {str(e)}")
-
-            # PubMed Search Section
-            st.header("2. PubMed Search")
-            
-            # Email input
-            email = st.text_input("Enter your email (required to search PubMed):", key="email")
-            
-            # Search options with fixed date range
-            col1, col2 = st.columns(2)
-            with col1:
-                date_from = st.date_input("Date From:", datetime(2015, 1, 1), min_value=datetime(1900, 1, 1), max_value=datetime.now())
-            with col2:
-                date_to = st.date_input("Date To:", datetime.now(), min_value=datetime(1900, 1, 1), max_value=datetime.now())
-            
-            # Article types (multiple selection)
-            article_types = [
-                "Clinical Trial", "Randomized Controlled Trial", "Review", 
-                "Systematic Review", "Meta-Analysis", "Case Reports",
-                "Observational Study", "Cohort Study", "Cross-Sectional Study"
-            ]
-            selected_article_types = st.multiselect(
-                "Article Types:", 
-                article_types,
-                key="article_types"
-            )
-            
-            # Languages (multiple selection)
-            languages = ["eng", "fre", "ger", "spa", "ita", "por", "rus", "chi", "jpn", "kor"]
-            language_names = {
-                "eng": "English", "fre": "French", "ger": "German", "spa": "Spanish",
-                "ita": "Italian", "por": "Portuguese", "rus": "Russian", "chi": "Chinese",
-                "jpn": "Japanese", "kor": "Korean"
-            }
-            selected_languages = st.multiselect(
-                "Languages:",
-                options=languages,
-                format_func=lambda x: language_names[x],
-                key="languages"
-            )
-            
-            # Search query input
-            search_query = st.text_area(
-                "Enter your PubMed search query:", 
-                key="search_query", 
-                placeholder="Enter your own PubMed search query or copy the AI generated string",
-                value=st.session_state.get("search_query", "")
-            )
-            
-            if st.button("Execute Search"):
-                if not email:
-                    st.error("Please enter your PubMed email")
-                elif not search_query:
-                    st.error("Please enter a search query")
-                else:
-                    try:
-                        # Build the base query first
-                        final_query = search_query.strip()
+                if st.button("Search PubMed", type="primary"):
+                    if not email:
+                        st.error("Please enter your email address (required for PubMed)")
+                    elif not st.session_state.get('groq_api_key'):
+                        st.error("Please enter your Groq API key")
+                    else:
+                        # Start the auto-search process
+                        if 'auto_search_state' not in st.session_state:
+                            st.session_state.auto_search_state = {
+                                "current_iteration": 0,
+                                "max_iterations": 5,
+                                "original_query": None,
+                                "current_query": None,
+                                "results": None,
+                                "count": 0,
+                                "all_attempts": [],
+                                "success": False,
+                                "error": None
+                            }
                         
-                        # Store original query for debugging
-                        original_query = final_query
+                        auto_search_progress = st.progress(0)
                         
-                        # Add filters one by one, with proper formatting
-                        filter_components = []
-                        
-                        if selected_languages:
-                            language_filters = [f'{lang}[Language]' for lang in selected_languages]
-                            if len(language_filters) == 1:
-                                filter_components.append(language_filters[0])
-                            else:
-                                filter_components.append(f"({' OR '.join(language_filters)})")
-                        
-                        # Format date with proper syntax
-                        if date_from and date_to:
-                            date_filter = f'{date_from.strftime("%Y/%m/%d")}:{date_to.strftime("%Y/%m/%d")}[Date - Publication]'
-                            filter_components.append(date_filter)
-                        
-                        if selected_article_types:
-                            type_filters = [f'"{at}"[Publication Type]' for at in selected_article_types]
-                            if len(type_filters) == 1:
-                                filter_components.append(type_filters[0])
-                            else:
-                                filter_components.append(f"({' OR '.join(type_filters)})")
-                        
-                        # Add all filters to the query
-                        if filter_components:
-                            final_query = f"({final_query}) AND {' AND '.join(filter_components)}"
-                        
-                        # Remove any extra spaces and normalize
-                        final_query = ' '.join(final_query.split())
-                        
-                        # Add detailed debug output
-                        st.write("Debug Information:")
-                        st.write("1. Original Base Query:", original_query)
-                        st.write("2. Applied Filters:")
-                        if selected_languages:
-                            st.write("   - Language filter:", ' OR '.join(language_filters))
-                        if date_from and date_to:
-                            st.write("   - Date filter:", date_filter)
-                        if selected_article_types:
-                            st.write("   - Article type filter:", ' OR '.join(type_filters))
-                        st.write("3. Final Query:", final_query)
-                        
-                        # Add a link to test the base query without filters
-                        encoded_base_query = original_query.replace(' ', '+')
-                        base_pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/?term={encoded_base_query}"
-                        st.markdown("4. Debug Links:")
-                        st.markdown(f"   - [Test base query without filters]({base_pubmed_url})")
-                        
-                        with st.spinner('Searching PubMed...'):
-                            results, count, warnings, cleaned_query = search_pubmed(final_query, email, retmax=1000, verify_ssl=False)
-                            
-                            if warnings:
-                                with st.expander("⚠️ Search Query Adjustments Found", expanded=True):
-                                    st.markdown("**Original Query:**")
-                                    st.code(final_query)
-                                    st.markdown("**Suggested Changes:**")
-                                    for warning in warnings:
-                                        st.info(warning)
-                                    st.markdown("**Updated Query:**")
-                                    st.code(cleaned_query)
-                                    if st.button("📋 Copy to Clipboard", key="copy_query_btn"):
-                                        # Use JavaScript to copy to clipboard
-                                        st.write(
-                                            f"""
-                                            <script>
-                                                navigator.clipboard.writeText(`{cleaned_query}`);
-                                            </script>
-                                            """,
-                                            unsafe_allow_html=True
-                                        )
-                                        st.success("Query copied to clipboard!")
-
-                            if not results:
-                                st.warning(f"No results found for the query: {final_query}")
-                                encoded_query = final_query.replace(' ', '+')
-                                pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/?term={encoded_query}"
-                                st.markdown(f"[Test full query on PubMed]({pubmed_url})")
-                                st.info("""Troubleshooting suggestions:
-1. Try the base query link above without filters first
-2. If the base query works, add filters one at a time
-3. Check if the date range is too restrictive
-4. Verify that the MeSH terms exist in PubMed's vocabulary""")
+                        with st.spinner("Generating search strategy and searching PubMed..."):
+                            try:
+                                # Reset the state for a new search
+                                st.session_state.auto_search_state = {
+                                    "current_iteration": 1,
+                                    "max_iterations": 5,
+                                    "original_query": None,
+                                    "current_query": None,
+                                    "results": None,
+                                    "count": 0,
+                                    "all_attempts": [],
+                                    "success": False,
+                                    "error": None
+                                }
                                 
-                                # Add LLM-based query improvement when there are zero results
-                                st.subheader("🔍 AI Query Analysis")
+                                # Generate initial search strategy
+                                validated_strategy, validation_notes, was_modified = debug_generate_and_validate_search_strategy(research_question, email)
                                 
-                                # Initialize session state variables if they don't exist
-                                if 'analysis_state' not in st.session_state:
-                                    st.session_state.analysis_state = {
-                                        'is_analyzing': False,
-                                        'analysis_complete': False,
-                                        'analysis_result': None,
-                                        'suggested_query': None,
-                                        'error': None
-                                    }
+                                # Extract the search query using regex
+                                try:
+                                    import re  # Explicitly import re here
+                                    pattern = r'SEARCH STRATEGY:\s*(.*?)(?:\s*EXPLANATION:|$)'
+                                    search_query_match = re.search(pattern, validated_strategy, re.DOTALL)
+                                except Exception as e:
+                                    st.error(f"Error in regex extraction: {str(e)}")
+                                    st.write(f"Debug: Traceback: {traceback.format_exc()}")
+                                    search_query_match = None
                                 
-                                # Function to handle analysis
-                                def run_analysis():
-                                    st.session_state.analysis_state['is_analyzing'] = True
-                                    st.session_state.analysis_state['error'] = None
-                                    st.session_state.analysis_state['analysis_complete'] = False
-                                    st.session_state.analysis_state['analysis_result'] = None
-                                    st.session_state.analysis_state['suggested_query'] = None
-                                
-                                # Show analysis button only if not already analyzing
-                                if not st.session_state.analysis_state['is_analyzing']:
-                                    if st.button("🔍 Analyze Query", key="start_analysis"):
-                                        run_analysis()
-                                        st.rerun()
-                                
-                                # If analysis is in progress, show the analysis
-                                if st.session_state.analysis_state['is_analyzing']:
-                                    try:
-                                        # Check for API key
-                                        if not st.session_state.get('groq_api_key'):
-                                            st.error("Please enter your Groq API key at the top of the page.")
-                                            st.session_state.analysis_state['is_analyzing'] = False
-                                            st.rerun()
-                                        
-                                        with st.spinner("Analyzing your query..."):
-                                            # Initialize Groq client
-                                            api_key = st.session_state.get('groq_api_key')
-                                            os.environ["GROQ_API_KEY"] = api_key
-                                            from groq import Groq
-                                            client = Groq(api_key=api_key)
-                                            
-                                            # Create the analysis prompt
-                                            analysis_prompt = f"""As a PubMed search expert, analyze this search query that returned zero results:
-
-```
-{final_query}
-```
-
-Please:
-1. Identify potential issues causing zero results
-2. Check for non-existent or misspelled MeSH terms
-3. Suggest a less restrictive search query
-4. Note if filters are too restrictive
-5. Format the suggested query in proper PubMed syntax
-
-Provide your analysis and a simplified alternative query."""
-                                            
-                                            # Make the API call
-                                            completion = client.chat.completions.create(
-                                                messages=[
-                                                    {
-                                                        "role": "system",
-                                                        "content": "You are a PubMed search expert helping researchers improve their queries."
-                                                    },
-                                                    {
-                                                        "role": "user",
-                                                        "content": analysis_prompt
-                                                    }
-                                                ],
-                                                model="qwen-qwq-32b",
-                                                temperature=0.4,
-                                            )
-                                            
-                                            # Process the response
-                                            analysis = completion.choices[0].message.content
-                                            
-                                            # Extract suggested query
-                                            import re
-                                            suggested_query = ""
-                                            
-                                            # Try to find query in code blocks
-                                            code_blocks = re.findall(r'```(.*?)```', analysis, re.DOTALL)
-                                            if code_blocks:
-                                                for block in code_blocks:
-                                                    if final_query not in block and len(block.strip()) > 20:
-                                                        suggested_query = block.strip()
-                                                        break
-                                            
-                                            # If no code block found, try quoted text
-                                            if not suggested_query:
-                                                quotes = re.findall(r'"([^"]+)"', analysis)
-                                                for quote in quotes:
-                                                    if len(quote) > 20 and ("[" in quote or "]" in quote):
-                                                        suggested_query = quote
-                                                        break
-                                            
-                                            # Store results in session state
-                                            st.session_state.analysis_state['analysis_complete'] = True
-                                            st.session_state.analysis_state['analysis_result'] = analysis
-                                            st.session_state.analysis_state['suggested_query'] = suggested_query
-                                            
-                                            # Display results
-                                            st.success("Analysis complete!")
-                                            st.markdown("### Analysis Results")
-                                            st.markdown(analysis)
-                                            
-                                            if suggested_query:
-                                                st.markdown("### Suggested Query")
-                                                st.code(suggested_query)
-                                                
-                                                col1, col2 = st.columns(2)
-                                                with col1:
-                                                    if st.button("Use This Query"):
-                                                        st.session_state.search_query = suggested_query
-                                                        st.session_state.analysis_state['is_analyzing'] = False
-                                                        st.rerun()
-                                                with col2:
-                                                    if st.button("Copy to Clipboard"):
-                                                        st.write(
-                                                            f"""
-                                                            <script>
-                                                                navigator.clipboard.writeText(`{suggested_query}`);
-                                                            </script>
-                                                            """,
-                                                            unsafe_allow_html=True
-                                                        )
-                                                        st.success("Query copied!")
-                                            
-                                            # Add button to start over
-                                            if st.button("Start New Analysis"):
-                                                st.session_state.analysis_state['is_analyzing'] = False
-                                                st.rerun()
-                                            
-                                    except Exception as e:
-                                        st.error(f"Error during analysis: {str(e)}")
-                                        st.session_state.analysis_state['error'] = str(e)
-                                        st.session_state.analysis_state['is_analyzing'] = False
-                                        if st.button("Try Again"):
-                                            st.rerun()
-                                
-                                return
-
-                            # Process results if we have them
-                            if results:
-                                # Fetch details for each result
-                                with st.spinner('Fetching paper details...'):
-                                    papers = fetch_details(results, email, verify_ssl=False)
-                                
-                                if papers and 'PubmedArticle' in papers:
-                                    # Convert to DataFrame
-                                    df = pd.DataFrame([{
-                                        'title': paper['MedlineCitation']['Article'].get('ArticleTitle', 'Not available'),
-                                        'journal': paper['MedlineCitation']['Article']['Journal'].get('Title', 'Not available'),
-                                        'year': paper['MedlineCitation']['Article']['Journal']['JournalIssue']['PubDate'].get('Year', 'Not available'),
-                                        'pmid': paper['MedlineCitation']['PMID'],
-                                        'abstract': " ".join(paper['MedlineCitation']['Article'].get('Abstract', {}).get('AbstractText', ['Not available']))
-                                    } for paper in papers['PubmedArticle']])
+                                if search_query_match:
+                                    query = search_query_match.group(1).strip()
+                                    st.session_state.auto_search_state["original_query"] = query
+                                    st.session_state.auto_search_state["current_query"] = query
                                     
-                                    st.session_state.unfiltered_df = df
-                                    st.session_state.filtered_df = df.copy()
+                                    # Save this attempt
+                                    st.session_state.auto_search_state["all_attempts"].append({
+                                        "iteration": 1,
+                                        "query": query,
+                                        "notes": validation_notes if was_modified else ["Initial query generation"]
+                                    })
                                     
-                                    st.success(f"Found {len(papers['PubmedArticle'])} papers")
+                                    st.info(f"Generated search query:")
+                                    st.code(query)
+                                    
+                                    auto_search_progress.progress(0.1)
+                                    
+                                    # Now execute the search
+                                    execute_auto_search(query, email, auto_search_progress)
                                 else:
-                                    st.warning("No valid paper data returned from PubMed")
-                    except Exception as e:
-                        st.error(f"Error during search: {str(e)}")
+                                    st.error("Could not extract search query from the generated strategy")
+                            except Exception as e:
+                                st.error(f"Error in search process: {str(e)}")
                         
-                        # Extract specific error types from the error message
-                        error_msg = str(e)
-                        
-                        # Check for specific error types
-                        if "PhraseNotFound" in error_msg or "FieldNotFound" in error_msg:
-                            st.warning("### Common Query Syntax Issues Detected")
+                        # Show results if the search was successful
+                        if st.session_state.auto_search_state["success"]:
+                            st.success(f"Search successful! Found {st.session_state.auto_search_state['count']} results.")
+                            st.session_state.search_query = st.session_state.auto_search_state["current_query"]
                             
-                            # Suggest fixes for common errors
-                            if "exp " in final_query:
-                                st.info("**OVID/MEDLINE Syntax Detected:** PubMed doesn't use 'exp' for MeSH terms. Use [Mesh] instead.")
-                                # Display example
-                                st.markdown("**Instead of:** `exp Hydroxymethylglutaryl-CoA Reductase Inhibitors/`")
-                                st.markdown("**Use:** `\"Hydroxymethylglutaryl-CoA Reductase Inhibitors\"[Mesh]`")
-                            
-                            if "[pt]" in final_query.lower():
-                                st.info("**Publication Type Syntax:** Use [Publication Type] instead of [pt]")
-                                st.markdown("**Instead of:** `animal [pt]`")
-                                st.markdown("**Use:** `\"animals\"[MeSH Terms]`")
-                            
-                            if "[tiab]" in final_query:
-                                st.info("**Field Tag Syntax:** Use [Title/Abstract] instead of [tiab]")
-                            
-                            if "/" in final_query and not "http" in final_query:
-                                st.info("**MeSH Term Syntax:** PubMed doesn't use the trailing slash after MeSH terms")
-                                
-                            # Offer a button to automatically convert OVID to PubMed syntax
-                            conversion_col1, conversion_col2 = st.columns([1, 2])
-                            with conversion_col1:
-                                if st.button("🔄 Convert OVID to PubMed", key="convert_ovid_button"):
-                                    try:
-                                        st.info("Converting OVID syntax to PubMed syntax...")
-                                        converted_query = convert_ovid_to_pubmed(final_query)
-                                        update_search_query(converted_query)
-                                    except Exception as conv_e:
-                                        st.error(f"Error converting query: {str(conv_e)}")
-                            with conversion_col2:
-                                st.info("This will update your search query with PubMed-compatible syntax.")
-                            
-                            # Link to PubMed syntax guide
-                            st.markdown("[📚 View PubMed Search Syntax Guide](https://pubmed.ncbi.nlm.nih.gov/help/#syntax)")
-                            
-                            # Show literal query that failed
-                            with st.expander("Full Query Details"):
-                                st.code(final_query)
+                            # Add Widen/Narrow search buttons
+                            refine_col1, refine_col2 = st.columns(2)
+                            with refine_col1:
+                                if st.button("Widen Search", key="widen_search_btn"):
+                                    if not email:
+                                        st.error("Please enter your email address (required for PubMed)")
+                                    elif not st.session_state.get('groq_api_key'):
+                                        st.error("Please enter your Groq API key")
+                                    else:
+                                        with st.spinner("Widening search criteria..."):
+                                            try:
+                                                # Initialize Groq client
+                                                client = get_groq_client()
+                                                
+                                                # Current query and research question
+                                                current_query = st.session_state.auto_search_state["current_query"]
+                                                current_count = st.session_state.auto_search_state["count"]
+                                                
+                                                # Create a prompt for widening search
+                                                widen_prompt = f"""You are an expert PubMed search specialist. 
+A search with the following query returned only {current_count} results, which is too few:
 
-            # Results and Filtering Section
+RESEARCH QUESTION: {research_question}
+
+CURRENT QUERY:
+{current_query}
+
+Please create a more general, broader version of this query that will return MORE results.
+Make these changes:
+1. Use more general MeSH terms (move up the MeSH hierarchy)
+2. Add synonyms with OR operators
+3. Remove restrictive filters or qualifiers
+4. Include related concepts
+5. Ensure proper PubMed syntax
+
+Return ONLY the revised search query with no explanation or additional text."""
+                                                
+                                                # Get the response from Groq
+                                                completion = client.chat.completions.create(
+                                                    messages=[
+                                                        {
+                                                            "role": "system",
+                                                            "content": "You are a PubMed search expert who creates valid search queries. Respond with just the refined query, no explanation or preamble."
+                                                        },
+                                                        {
+                                                            "role": "user",
+                                                            "content": widen_prompt
+                                                        }
+                                                    ],
+                                                    model="qwen-qwq-32b",
+                                                    temperature=0.2,
+                                                )
+                                                
+                                                # Extract the refined query
+                                                import re
+                                                widened_query = completion.choices[0].message.content.strip()
+                                                
+                                                # Clean up any markdown code blocks
+                                                if "```" in widened_query:
+                                                    try:
+                                                        code_block_match = re.search(r'```(?:\w+\n)?(.*?)```', widened_query, re.DOTALL)
+                                                        if code_block_match:
+                                                            widened_query = code_block_match.group(1).strip()
+                                                    except Exception:
+                                                        # If regex fails, do basic string cleanup
+                                                        widened_query = widened_query.replace("```", "").strip()
+                                                
+                                                # Reset the search state
+                                                st.session_state.auto_search_state = {
+                                                    "current_iteration": 1,
+                                                    "max_iterations": 5,
+                                                    "original_query": widened_query,
+                                                    "current_query": widened_query,
+                                                    "results": None,
+                                                    "count": 0,
+                                                    "all_attempts": [
+                                                        {
+                                                            "iteration": 1,
+                                                            "query": widened_query,
+                                                            "notes": ["Widened search criteria"]
+                                                        }
+                                                    ],
+                                                    "success": False,
+                                                    "error": None
+                                                }
+                                                
+                                                # Display the new query
+                                                st.info("Generated a wider search query:")
+                                                st.code(widened_query)
+                                                
+                                                # Execute the new search
+                                                execute_auto_search(widened_query, email)
+                                                
+                                                # Force a rerun to update the interface
+                                                st.rerun()
+                                                
+                                            except Exception as e:
+                                                st.error(f"Error widening search: {str(e)}")
+                            
+                            with refine_col2:
+                                if st.button("Narrow Search", key="narrow_search_btn"):
+                                    if not email:
+                                        st.error("Please enter your email address (required for PubMed)")
+                                    elif not st.session_state.get('groq_api_key'):
+                                        st.error("Please enter your Groq API key")
+                                    else:
+                                        with st.spinner("Narrowing search criteria..."):
+                                            try:
+                                                # Initialize Groq client
+                                                client = get_groq_client()
+                                                
+                                                # Current query and research question
+                                                current_query = st.session_state.auto_search_state["current_query"]
+                                                current_count = st.session_state.auto_search_state["count"]
+                                                
+                                                # Create a prompt for narrowing search
+                                                narrow_prompt = f"""You are an expert PubMed search specialist. 
+A search with the following query returned {current_count} results, which is too many:
+
+RESEARCH QUESTION: {research_question}
+
+CURRENT QUERY:
+{current_query}
+
+Please create a more specific, focused version of this query that will return FEWER but more relevant results.
+Make these changes:
+1. Use more specific MeSH terms (move down the MeSH hierarchy)
+2. Add more specific qualifiers
+3. Add key filters (publication types, dates, languages)
+4. Focus on the core concepts of the research question 
+5. Ensure proper PubMed syntax
+
+Return ONLY the revised search query with no explanation or additional text."""
+                                                
+                                                # Get the response from Groq
+                                                completion = client.chat.completions.create(
+                                                    messages=[
+                                                        {
+                                                            "role": "system",
+                                                            "content": "You are a PubMed search expert who creates valid search queries. Respond with just the refined query, no explanation or preamble."
+                                                        },
+                                                        {
+                                                            "role": "user",
+                                                            "content": narrow_prompt
+                                                        }
+                                                    ],
+                                                    model="qwen-qwq-32b",
+                                                    temperature=0.2,
+                                                )
+                                                
+                                                # Extract the refined query
+                                                import re
+                                                narrowed_query = completion.choices[0].message.content.strip()
+                                                
+                                                # Clean up any markdown code blocks
+                                                if "```" in narrowed_query:
+                                                    try:
+                                                        code_block_match = re.search(r'```(?:\w+\n)?(.*?)```', narrowed_query, re.DOTALL)
+                                                        if code_block_match:
+                                                            narrowed_query = code_block_match.group(1).strip()
+                                                    except Exception:
+                                                        # If regex fails, do basic string cleanup
+                                                        narrowed_query = narrowed_query.replace("```", "").strip()
+                                                
+                                                # Reset the search state
+                                                st.session_state.auto_search_state = {
+                                                    "current_iteration": 1,
+                                                    "max_iterations": 5,
+                                                    "original_query": narrowed_query,
+                                                    "current_query": narrowed_query,
+                                                    "results": None,
+                                                    "count": 0,
+                                                    "all_attempts": [
+                                                        {
+                                                            "iteration": 1,
+                                                            "query": narrowed_query,
+                                                            "notes": ["Narrowed search criteria"]
+                                                        }
+                                                    ],
+                                                    "success": False,
+                                                    "error": None
+                                                }
+                                                
+                                                # Display the new query
+                                                st.info("Generated a narrower search query:")
+                                                st.code(narrowed_query)
+                                                
+                                                # Execute the new search
+                                                execute_auto_search(narrowed_query, email)
+                                                
+                                                # Force a rerun to update the interface
+                                                st.rerun()
+                                                
+                                            except Exception as e:
+                                                st.error(f"Error narrowing search: {str(e)}")
+                            
+                            # Display a summary of the search
+                            with st.expander("Search Details", expanded=True):
+                                for i, attempt in enumerate(st.session_state.auto_search_state["all_attempts"]):
+                                    status = "✅ Success" if i == len(st.session_state.auto_search_state["all_attempts"]) - 1 and st.session_state.auto_search_state["success"] else "❌ Failed"
+                                    st.markdown(f"**Attempt {attempt['iteration']}:** {status}")
+                                    st.code(attempt["query"])
+                                    if "result_count" in attempt:
+                                        st.info(f"Results: {attempt['result_count']}")
+                                    if "error" in attempt:
+                                        st.error(f"Error: {attempt['error']}")
+                                    if i < len(st.session_state.auto_search_state["all_attempts"]) - 1:
+                                        st.markdown("---")
+                        
+                        # If we reached max iterations without success, show the error
+                        elif st.session_state.auto_search_state["current_iteration"] >= st.session_state.auto_search_state["max_iterations"]:
+                            st.error(f"Maximum {st.session_state.auto_search_state['max_iterations']} search attempts reached without success")
+                            
+                            # Show the last error if any
+                            if st.session_state.auto_search_state["error"]:
+                                st.error(f"Last error: {st.session_state.auto_search_state['error']}")
+                            
+                            # Display all attempts
+                            with st.expander("All Search Attempts", expanded=True):
+                                for attempt in st.session_state.auto_search_state["all_attempts"]:
+                                    st.markdown(f"**Attempt {attempt['iteration']}:**")
+                                    st.code(attempt["query"])
+                                    if "result_count" in attempt:
+                                        st.info(f"Results: {attempt['result_count']}")
+                                    if "error" in attempt:
+                                        st.error(f"Error: {attempt['error']}")
+                                    st.markdown("---")
+
+            # PubMed Search Section - changed to Filtering Results
+            st.header("2. Filtering Results")
+            
             if st.session_state.unfiltered_df is not None:
-                st.header("3. Filter Results")
+                # Show count of articles found
+                st.info(f"Found {len(st.session_state.unfiltered_df)} articles. Apply filters below if needed.")
                 
                 # Filter by year
                 years = sorted(st.session_state.unfiltered_df['year'].unique())
                 selected_years = st.multiselect("Filter by Year:", years)
                 
-                # Filter by journal
-                journals = sorted(st.session_state.unfiltered_df['journal'].unique())
-                selected_journals = st.multiselect("Filter by Journal:", journals)
+                # Article types (multiple selection)
+                article_types = [
+                    "Clinical Trial", "Randomized Controlled Trial", "Review", 
+                    "Systematic Review", "Meta-Analysis", "Case Reports",
+                    "Observational Study", "Cohort Study", "Cross-Sectional Study"
+                ]
+                selected_article_types = st.multiselect(
+                    "Article Types:", 
+                    article_types,
+                    key="article_types"
+                )
                 
-                # Apply filters
-                if selected_years or selected_journals:
-                    filtered_df = st.session_state.unfiltered_df.copy()
-                    
-                    if selected_years:
-                        filtered_df = filtered_df[filtered_df['year'].isin(selected_years)]
-                    
-                    if selected_journals:
-                        filtered_df = filtered_df[filtered_df['journal'].isin(selected_journals)]
-                    
-                    st.session_state.filtered_df = filtered_df
+                # Languages (multiple selection)
+                languages = ["eng", "fre", "ger", "spa", "ita", "por", "rus", "chi", "jpn", "kor"]
+                language_names = {
+                    "eng": "English", "fre": "French", "ger": "German", "spa": "Spanish",
+                    "ita": "Italian", "por": "Portuguese", "rus": "Russian", "chi": "Chinese",
+                    "jpn": "Japanese", "kor": "Korean"
+                }
+                selected_languages = st.multiselect(
+                    "Languages:",
+                    options=languages,
+                    format_func=lambda x: language_names[x],
+                    key="languages"
+                )
                 
-                # Summary Generation (moved to left column)
-                st.header("4. Generate Summary")
+                if st.button("Apply Filters"):
+                    try:
+                        # Apply DataFrame-based filters first (year)
+                        if selected_years:
+                            filtered_df = st.session_state.unfiltered_df.copy()
+                            
+                            if selected_years:
+                                filtered_df = filtered_df[filtered_df['year'].isin(selected_years)]
+                            
+                            st.session_state.filtered_df = filtered_df
+                            st.success(f"Filtered to {len(filtered_df)} papers based on year criteria")
+                        
+                        # Check if we need to apply PubMed-based filters (article types, languages)
+                        if selected_languages or selected_article_types:
+                            # Build the base query first
+                            final_query = st.session_state.auto_search_state["current_query"]
+                            
+                            # Store original query for debugging
+                            original_query = final_query
+                            
+                            # Add filters one by one, with proper formatting
+                            filter_components = []
+                            
+                            if selected_languages:
+                                language_filters = [f'{lang}[Language]' for lang in selected_languages]
+                                if len(language_filters) == 1:
+                                    filter_components.append(language_filters[0])
+                                else:
+                                    filter_components.append(f"({' OR '.join(language_filters)})")
+                            
+                            if selected_article_types:
+                                type_filters = [f'"{at}"[Publication Type]' for at in selected_article_types]
+                                if len(type_filters) == 1:
+                                    filter_components.append(type_filters[0])
+                                else:
+                                    filter_components.append(f"({' OR '.join(type_filters)})")
+                            
+                            # Add all filters to the query
+                            if filter_components:
+                                final_query = f"({final_query}) AND {' AND '.join(filter_components)}"
+                            
+                            # Remove any extra spaces and normalize
+                            final_query = ' '.join(final_query.split())
+                            
+                            # Execute search with filters
+                            with st.spinner('Searching PubMed with filters...'):
+                                results, count, warnings, cleaned_query = search_pubmed(final_query, email, retmax=1000, verify_ssl=False)
+                                
+                                if warnings:
+                                    with st.expander("⚠️ Search Query Adjustments Found", expanded=True):
+                                        st.markdown("**Original Query:**")
+                                        st.code(final_query)
+                                        st.markdown("**Suggested Changes:**")
+                                        for warning in warnings:
+                                            st.info(warning)
+                                        st.markdown("**Updated Query:**")
+                                        st.code(cleaned_query)
+
+                                if not results:
+                                    st.warning(f"No results found with the applied filters. Try broadening your criteria.")
+                                    return
+
+                                # Process results if we have them
+                                if results:
+                                    # Fetch details for each result
+                                    with st.spinner('Fetching paper details...'):
+                                        papers = fetch_details(results, email, verify_ssl=False)
+                                    
+                                    if papers and 'PubmedArticle' in papers:
+                                        # Convert to DataFrame
+                                        df = pd.DataFrame([{
+                                            'title': paper['MedlineCitation']['Article'].get('ArticleTitle', 'Not available'),
+                                            'journal': paper['MedlineCitation']['Article']['Journal'].get('Title', 'Not available'),
+                                            'year': paper['MedlineCitation']['Article']['Journal']['JournalIssue']['PubDate'].get('Year', 'Not available'),
+                                            'pmid': paper['MedlineCitation']['PMID'],
+                                            'abstract': " ".join(paper['MedlineCitation']['Article'].get('Abstract', {}).get('AbstractText', ['Not available']))
+                                        } for paper in papers['PubmedArticle']])
+                                        
+                                        # Apply DataFrame filters again to ensure consistency
+                                        if selected_years:
+                                            df = df[df['year'].isin(selected_years)]
+                                        
+                                        st.session_state.filtered_df = df.copy()
+                                        
+                                        st.success(f"Found {len(df)} papers after applying all filters")
+                                    else:
+                                        st.warning("No valid paper data returned from PubMed after applying filters")
+                    except Exception as e:
+                        st.error(f"Error applying filters: {str(e)}")
+                        st.write(f"Debug: {traceback.format_exc()}")
+            else:
+                st.info("Execute a search first to see filtering options.")
+
+            # Results and Filtering Section
+            if st.session_state.unfiltered_df is not None:
+                st.header("3. Generate Summary")
                 
                 # Get non-excluded papers
                 included_df = st.session_state.filtered_df[~st.session_state.filtered_df['pmid'].isin(st.session_state.excluded_pmids)]
@@ -655,7 +671,7 @@ Provide your analysis and a simplified alternative query."""
                     st.text_area("Generated Summary:", st.session_state.summary, height=400)
                 
                 # Ask the Literature section
-                st.header("5. Ask the Literature")
+                st.header("4. Ask the Literature")
                 st.write("Ask a specific question about the selected papers.")
                 
                 # Question input
@@ -966,6 +982,308 @@ def reset_and_rerun():
     """Helper function to reset and rerun the app"""
     reset_app()
     st.rerun()
+
+def execute_auto_search(query, email, progress_bar=None):
+    """
+    Execute a PubMed search and handle refinement if needed.
+    
+    Args:
+        query: The search query to execute
+        email: User's email for PubMed
+        progress_bar: Optional Streamlit progress bar to update
+    
+    Returns:
+        None - updates session state
+    """
+    try:
+        # Execute the search
+        results, count, warnings, cleaned_query = search_pubmed(query, email, retmax=1000, verify_ssl=False)
+        
+        # Update the current attempt with results
+        current_attempt = st.session_state.auto_search_state["all_attempts"][-1]
+        current_attempt["result_count"] = count
+        current_attempt["warnings"] = warnings
+        current_attempt["cleaned_query"] = cleaned_query
+        
+        # Update progress
+        if progress_bar:
+            progress_bar.progress(0.3 + (0.7 * st.session_state.auto_search_state["current_iteration"] / st.session_state.auto_search_state["max_iterations"]))
+        
+        # Check if we got any results
+        if count > 0:
+            # Success - we have results
+            st.session_state.auto_search_state["success"] = True
+            st.session_state.auto_search_state["results"] = results
+            st.session_state.auto_search_state["count"] = count
+            st.session_state.auto_search_state["current_query"] = cleaned_query
+            
+            # Fetch paper details to prepare for display
+            with st.spinner('Fetching paper details...'):
+                papers = fetch_details(results, email, verify_ssl=False)
+            
+            if papers and 'PubmedArticle' in papers:
+                # Convert to DataFrame
+                df = pd.DataFrame([{
+                    'title': paper['MedlineCitation']['Article'].get('ArticleTitle', 'Not available'),
+                    'journal': paper['MedlineCitation']['Article']['Journal'].get('Title', 'Not available'),
+                    'year': paper['MedlineCitation']['Article']['Journal']['JournalIssue']['PubDate'].get('Year', 'Not available'),
+                    'pmid': paper['MedlineCitation']['PMID'],
+                    'abstract': " ".join(paper['MedlineCitation']['Article'].get('Abstract', {}).get('AbstractText', ['Not available']))
+                } for paper in papers['PubmedArticle']])
+                
+                st.session_state.unfiltered_df = df
+                st.session_state.filtered_df = df.copy()
+                
+                # Update UI - this needs to be handled by the caller with a rerun
+                st.success(f"Found {count} papers matching your search criteria.")
+            
+            return True
+        else:
+            # No results - need to refine
+            if st.session_state.auto_search_state["current_iteration"] < st.session_state.auto_search_state["max_iterations"]:
+                # Increment iteration counter
+                st.session_state.auto_search_state["current_iteration"] += 1
+                
+                # Generate a more broad query
+                refine_query(
+                    st.session_state.auto_search_state["current_query"], 
+                    0,  # Zero results
+                    email, 
+                    progress_bar
+                )
+            else:
+                st.warning(f"No results found after {st.session_state.auto_search_state['max_iterations']} attempts")
+            
+            return False
+    
+    except Exception as e:
+        # Store the error
+        st.session_state.auto_search_state["error"] = str(e)
+        
+        # Update the current attempt with the error
+        current_attempt = st.session_state.auto_search_state["all_attempts"][-1]
+        current_attempt["error"] = str(e)
+        
+        # If we haven't hit max iterations, try to refine the query
+        if st.session_state.auto_search_state["current_iteration"] < st.session_state.auto_search_state["max_iterations"]:
+            # Increment iteration counter
+            st.session_state.auto_search_state["current_iteration"] += 1
+            
+            # Generate a more broad query based on the error
+            refine_query(
+                st.session_state.auto_search_state["current_query"], 
+                -1,  # Error code
+                email,
+                progress_bar,
+                error_message=str(e)
+            )
+        else:
+            st.error(f"Maximum attempts reached. Last error: {str(e)}")
+        
+        return False
+
+def refine_query(current_query, result_count, email, progress_bar=None, error_message=None):
+    """
+    Refine a search query based on results or errors.
+    
+    Args:
+        current_query: The current search query
+        result_count: Number of results from previous search (-1 for error)
+        email: User's email for PubMed
+        progress_bar: Optional Streamlit progress bar to update
+        error_message: Optional error message if there was an error
+    
+    Returns:
+        None - updates session state and triggers new search
+    """
+    try:
+        # Import re module at the beginning of the function
+        import re
+        
+        # Initialize Groq client
+        client = get_groq_client()
+        
+        # Create a refinement prompt based on the outcome
+        if result_count == 0:
+            refinement_prompt = f"""You are an expert PubMed search specialist. 
+A PubMed search with the following query returned ZERO results:
+
+```
+{current_query}
+```
+
+Create a more broad, simplified version of this query that is more likely to return results.
+Make these specific changes:
+1. Remove any overly specific filters or qualifiers
+2. Use more general terms
+3. Simplify the boolean structure
+4. Ensure proper PubMed syntax
+
+Return ONLY the refined search query with no explanation or additional text."""
+        else:  # Error occurred
+            refinement_prompt = f"""You are an expert PubMed search specialist. 
+A PubMed search with the following query returned an ERROR:
+
+```
+{current_query}
+```
+
+Error message: {error_message}
+
+Rewrite this query to fix syntax errors and ensure it will work properly in PubMed. 
+Make these specific changes:
+1. Fix any syntax errors
+2. Use proper PubMed field tags
+3. Ensure balanced parentheses and quotes
+4. Simplify the query structure if too complex
+
+Return ONLY the corrected search query with no explanation or additional text."""
+        
+        # Get the response
+        completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a PubMed search expert who creates valid search queries. Respond with just the refined query, no explanation or preamble."
+                },
+                {
+                    "role": "user",
+                    "content": refinement_prompt
+                }
+            ],
+            model="qwen-qwq-32b",
+            temperature=0.2,
+        )
+        
+        # Extract the refined query
+        refined_query = completion.choices[0].message.content.strip()
+        
+        # Clean up any markdown code blocks
+        if "```" in refined_query:
+            try:
+                code_block_match = re.search(r'```(?:\w+\n)?(.*?)```', refined_query, re.DOTALL)
+                if code_block_match:
+                    refined_query = code_block_match.group(1).strip()
+            except Exception as e:
+                st.error(f"Error extracting code block: {str(e)}")
+                # If regex fails, do basic string cleanup
+                refined_query = refined_query.replace("```", "").strip()
+        
+        # Update session state
+        st.session_state.auto_search_state["current_query"] = refined_query
+        
+        # Save this attempt
+        st.session_state.auto_search_state["all_attempts"].append({
+            "iteration": st.session_state.auto_search_state["current_iteration"],
+            "query": refined_query,
+            "notes": [f"Refined query after {'error' if result_count == -1 else 'zero results'}"]
+        })
+        
+        # Update progress bar
+        if progress_bar:
+            progress_bar.progress(0.3 + (0.7 * (st.session_state.auto_search_state["current_iteration"] - 1) / st.session_state.auto_search_state["max_iterations"]))
+        
+        # Execute the refined search
+        st.info(f"Trying refined query (Attempt {st.session_state.auto_search_state['current_iteration']} of {st.session_state.auto_search_state['max_iterations']})")
+        st.code(refined_query)
+        
+        # Execute the search with the refined query
+        execute_auto_search(refined_query, email, progress_bar)
+        
+    except Exception as e:
+        st.error(f"Error refining query: {str(e)}")
+        st.write(f"Debug traceback: {traceback.format_exc()}")
+        st.session_state.auto_search_state["error"] = str(e)
+        
+        # If we still haven't hit max iterations, try once more with a simpler approach
+        if st.session_state.auto_search_state["current_iteration"] < st.session_state.auto_search_state["max_iterations"]:
+            # Increment iteration counter
+            st.session_state.auto_search_state["current_iteration"] += 1
+            
+            try:
+                # Generate an emergency simplified query
+                emergency_query = emergency_simplify_query(current_query)
+                
+                # Update session state
+                st.session_state.auto_search_state["current_query"] = emergency_query
+                
+                # Save this emergency attempt
+                st.session_state.auto_search_state["all_attempts"].append({
+                    "iteration": st.session_state.auto_search_state["current_iteration"],
+                    "query": emergency_query,
+                    "notes": ["Emergency simplified query after refinement error"]
+                })
+                
+                # Execute the emergency search
+                st.warning(f"Trying emergency simplified query (Attempt {st.session_state.auto_search_state['current_iteration']} of {st.session_state.auto_search_state['max_iterations']})")
+                st.code(emergency_query)
+                
+                execute_auto_search(emergency_query, email, progress_bar)
+            except Exception as e2:
+                st.error(f"Emergency query also failed: {str(e2)}")
+                st.write(f"Debug emergency traceback: {traceback.format_exc()}")
+
+def emergency_simplify_query(query):
+    """
+    Create a drastically simplified version of a search query as a last resort.
+    
+    Args:
+        query: The complex query that failed
+    
+    Returns:
+        str: A basic simplified query
+    """
+    try:
+        # Import re at function start
+        import re
+        
+        # Extract main terms (words in quotes or words before field tags)
+        terms = re.findall(r'"([^"]+)"', query)
+        terms += re.findall(r'(\w+)\[', query)
+        
+        # Remove duplicates and filter out common words
+        stopwords = ["and", "or", "not", "the", "a", "an", "in", "on", "of", "to", "for"]
+        filtered_terms = [term for term in terms if len(term) > 2 and term.lower() not in stopwords]
+        
+        # Take up to 3 most likely meaningful terms
+        main_terms = list(set(filtered_terms))[:3]
+        
+        # If we couldn't find any terms, extract words longer than 5 characters
+        if not main_terms:
+            words = re.findall(r'\b(\w{5,})\b', query)
+            main_terms = list(set([w for w in words if w.lower() not in stopwords]))[:3]
+        
+        # If still empty, return a very basic query
+        if not main_terms:
+            return "heart disease[MeSH Terms]"
+        
+        # Create a simple OR query with the main terms as text words
+        simple_query = " OR ".join([f'"{term}"[Text Word]' for term in main_terms])
+        
+        # Add a date range if we have one in the original query
+        date_range = re.search(r'(\d{4}/\d{2}/\d{2}:\d{4}/\d{2}/\d{2})\[Date - Publication\]', query)
+        if date_range:
+            simple_query += f" AND {date_range.group(0)}"
+        
+        return simple_query
+    except Exception as e:
+        st.error(f"Error in emergency query simplification: {str(e)}")
+        st.write(f"Debug traceback: {traceback.format_exc()}")
+        # Return a very basic fallback query that should work
+        return "heart[MeSH Terms]"
+
+# Create a debug wrapper for the generate_and_validate_search_strategy function
+def debug_generate_and_validate_search_strategy(research_question, email):
+    """Debug wrapper for generate_and_validate_search_strategy with explicit error handling"""
+    try:
+        # Add explicit import of re inside the function
+        import re
+        return generate_and_validate_search_strategy(research_question, email)
+    except Exception as e:
+        st.error(f"Debug error in search strategy generation: {str(e)}")
+        st.write(f"Traceback: {traceback.format_exc()}")
+        # Return a fallback empty strategy
+        return f"Error generating strategy: {str(e)}", ["Error occurred"], False
 
 if __name__ == "__main__":
     main() 
