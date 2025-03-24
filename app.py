@@ -10,10 +10,11 @@ import pandas as pd
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-from pubmed_utils import search_pubmed, fetch_details
-from groq_utils import generate_search_strategy, generate_summary, ask_literature, get_groq_client
+from pubmed_utils import search_pubmed, fetch_details, convert_ovid_to_pubmed
+from groq_utils import generate_search_strategy, generate_summary, ask_literature, get_groq_client, generate_and_validate_search_strategy
 from search_utils import SearchManager
 import ssl_bypass
+import re
 
 # Load environment variables
 load_dotenv()
@@ -29,6 +30,8 @@ if 'summary' not in st.session_state:
     st.session_state.summary = None
 if 'excluded_pmids' not in st.session_state:
     st.session_state.excluded_pmids = set()
+if 'search_query' not in st.session_state:
+    st.session_state.search_query = ""
 
 def reset_app():
     """Reset all session state variables except API key and email"""
@@ -61,6 +64,11 @@ def reset_app():
     # Clear multiselect values
     st.session_state["article_types"] = []  # Clear article types selection
     st.session_state["languages"] = []      # Clear languages selection
+
+def update_search_query(query):
+    """Update the search query and trigger rerun"""
+    st.session_state.search_query = query
+    st.rerun()
 
 # Move this BEFORE the main() function, right after your imports
 st.set_page_config(
@@ -174,11 +182,50 @@ def main():
             
             if research_question:
                 if st.button("Generate Search Strategy"):
-                    with st.spinner("Generating search strategy..."):
+                    with st.spinner("Generating and validating search strategy..."):
                         try:
-                            strategy = generate_search_strategy(research_question)
-                            st.session_state.search_manager.current_query = strategy
-                            st.text_area("Generated Search Strategy:", strategy, height=200)
+                            # Get the email for MeSH term validation
+                            email = st.session_state.get('email', '')
+                            
+                            if not email:
+                                st.warning("For best results, please enter your email address in the form below. This will allow the system to validate MeSH terms against PubMed.")
+                                strategy = generate_search_strategy(research_question)
+                                st.session_state.search_manager.current_query = strategy
+                                st.text_area("Generated Search Strategy:", strategy, height=200)
+                            else:
+                                # Generate and validate the search strategy in one step
+                                validated_strategy, validation_notes, was_modified = generate_and_validate_search_strategy(research_question, email)
+                                st.session_state.search_manager.current_query = validated_strategy
+                                
+                                # Display the validated strategy
+                                st.text_area("Generated Search Strategy:", validated_strategy, height=200)
+                                
+                                # Display validation information if terms were modified
+                                if was_modified and validation_notes:
+                                    with st.expander("🔍 MeSH Term Validation Details", expanded=True):
+                                        st.info("The system validated all MeSH terms against the PubMed database and made the following changes:")
+                                        for note in validation_notes:
+                                            st.markdown(f"- {note}")
+                                        st.markdown("These changes ensure your search query will work properly on PubMed.")
+                                        
+                                        # Extract just the validated search query for easy use
+                                        search_query_match = re.search(r'SEARCH STRATEGY:\s*(.*?)(?:\s*EXPLANATION:|$)', validated_strategy, re.DOTALL)
+                                        if search_query_match:
+                                            validated_query = search_query_match.group(1).strip()
+                                            st.markdown("### Validated Search Query:")
+                                            st.code(validated_query)
+                                            
+                                            # Add a "Use this validated query" button
+                                            if st.button("Use this validated query"):
+                                                st.session_state.search_query = validated_query
+                                                st.success("Query applied to the search field below!")
+                                                # Add an automatic scroll hint
+                                                st.markdown("""
+                                                <script>
+                                                    document.getElementById("search_query").scrollIntoView();
+                                                </script>
+                                                """, unsafe_allow_html=True)
+                                
                         except Exception as e:
                             st.error(f"Error generating search strategy: {str(e)}")
 
@@ -222,7 +269,12 @@ def main():
             )
             
             # Search query input
-            search_query = st.text_area("Enter your PubMed search query:", key="search_query")
+            search_query = st.text_area(
+                "Enter your PubMed search query:", 
+                key="search_query", 
+                placeholder="Enter your own PubMed search query or copy the AI generated string",
+                value=st.session_state.get("search_query", "")
+            )
             
             if st.button("Execute Search"):
                 if not email:
@@ -296,9 +348,17 @@ def main():
                                         st.info(warning)
                                     st.markdown("**Updated Query:**")
                                     st.code(cleaned_query)
-                                    if st.button("Use Updated Query"):
-                                        st.session_state.search_query = cleaned_query
-                                        st.rerun()
+                                    if st.button("📋 Copy to Clipboard", key="copy_query_btn"):
+                                        # Use JavaScript to copy to clipboard
+                                        st.write(
+                                            f"""
+                                            <script>
+                                                navigator.clipboard.writeText(`{cleaned_query}`);
+                                            </script>
+                                            """,
+                                            unsafe_allow_html=True
+                                        )
+                                        st.success("Query copied to clipboard!")
 
                             if not results:
                                 st.warning(f"No results found for the query: {final_query}")
@@ -310,6 +370,149 @@ def main():
 2. If the base query works, add filters one at a time
 3. Check if the date range is too restrictive
 4. Verify that the MeSH terms exist in PubMed's vocabulary""")
+                                
+                                # Add LLM-based query improvement when there are zero results
+                                st.subheader("🔍 AI Query Analysis")
+                                
+                                # Initialize session state variables if they don't exist
+                                if 'analysis_state' not in st.session_state:
+                                    st.session_state.analysis_state = {
+                                        'is_analyzing': False,
+                                        'analysis_complete': False,
+                                        'analysis_result': None,
+                                        'suggested_query': None,
+                                        'error': None
+                                    }
+                                
+                                # Function to handle analysis
+                                def run_analysis():
+                                    st.session_state.analysis_state['is_analyzing'] = True
+                                    st.session_state.analysis_state['error'] = None
+                                    st.session_state.analysis_state['analysis_complete'] = False
+                                    st.session_state.analysis_state['analysis_result'] = None
+                                    st.session_state.analysis_state['suggested_query'] = None
+                                
+                                # Show analysis button only if not already analyzing
+                                if not st.session_state.analysis_state['is_analyzing']:
+                                    if st.button("🔍 Analyze Query", key="start_analysis"):
+                                        run_analysis()
+                                        st.rerun()
+                                
+                                # If analysis is in progress, show the analysis
+                                if st.session_state.analysis_state['is_analyzing']:
+                                    try:
+                                        # Check for API key
+                                        if not st.session_state.get('groq_api_key'):
+                                            st.error("Please enter your Groq API key at the top of the page.")
+                                            st.session_state.analysis_state['is_analyzing'] = False
+                                            st.rerun()
+                                        
+                                        with st.spinner("Analyzing your query..."):
+                                            # Initialize Groq client
+                                            api_key = st.session_state.get('groq_api_key')
+                                            os.environ["GROQ_API_KEY"] = api_key
+                                            from groq import Groq
+                                            client = Groq(api_key=api_key)
+                                            
+                                            # Create the analysis prompt
+                                            analysis_prompt = f"""As a PubMed search expert, analyze this search query that returned zero results:
+
+```
+{final_query}
+```
+
+Please:
+1. Identify potential issues causing zero results
+2. Check for non-existent or misspelled MeSH terms
+3. Suggest a less restrictive search query
+4. Note if filters are too restrictive
+5. Format the suggested query in proper PubMed syntax
+
+Provide your analysis and a simplified alternative query."""
+                                            
+                                            # Make the API call
+                                            completion = client.chat.completions.create(
+                                                messages=[
+                                                    {
+                                                        "role": "system",
+                                                        "content": "You are a PubMed search expert helping researchers improve their queries."
+                                                    },
+                                                    {
+                                                        "role": "user",
+                                                        "content": analysis_prompt
+                                                    }
+                                                ],
+                                                model="qwen-qwq-32b",
+                                                temperature=0.4,
+                                            )
+                                            
+                                            # Process the response
+                                            analysis = completion.choices[0].message.content
+                                            
+                                            # Extract suggested query
+                                            import re
+                                            suggested_query = ""
+                                            
+                                            # Try to find query in code blocks
+                                            code_blocks = re.findall(r'```(.*?)```', analysis, re.DOTALL)
+                                            if code_blocks:
+                                                for block in code_blocks:
+                                                    if final_query not in block and len(block.strip()) > 20:
+                                                        suggested_query = block.strip()
+                                                        break
+                                            
+                                            # If no code block found, try quoted text
+                                            if not suggested_query:
+                                                quotes = re.findall(r'"([^"]+)"', analysis)
+                                                for quote in quotes:
+                                                    if len(quote) > 20 and ("[" in quote or "]" in quote):
+                                                        suggested_query = quote
+                                                        break
+                                            
+                                            # Store results in session state
+                                            st.session_state.analysis_state['analysis_complete'] = True
+                                            st.session_state.analysis_state['analysis_result'] = analysis
+                                            st.session_state.analysis_state['suggested_query'] = suggested_query
+                                            
+                                            # Display results
+                                            st.success("Analysis complete!")
+                                            st.markdown("### Analysis Results")
+                                            st.markdown(analysis)
+                                            
+                                            if suggested_query:
+                                                st.markdown("### Suggested Query")
+                                                st.code(suggested_query)
+                                                
+                                                col1, col2 = st.columns(2)
+                                                with col1:
+                                                    if st.button("Use This Query"):
+                                                        st.session_state.search_query = suggested_query
+                                                        st.session_state.analysis_state['is_analyzing'] = False
+                                                        st.rerun()
+                                                with col2:
+                                                    if st.button("Copy to Clipboard"):
+                                                        st.write(
+                                                            f"""
+                                                            <script>
+                                                                navigator.clipboard.writeText(`{suggested_query}`);
+                                                            </script>
+                                                            """,
+                                                            unsafe_allow_html=True
+                                                        )
+                                                        st.success("Query copied!")
+                                            
+                                            # Add button to start over
+                                            if st.button("Start New Analysis"):
+                                                st.session_state.analysis_state['is_analyzing'] = False
+                                                st.rerun()
+                                            
+                                    except Exception as e:
+                                        st.error(f"Error during analysis: {str(e)}")
+                                        st.session_state.analysis_state['error'] = str(e)
+                                        st.session_state.analysis_state['is_analyzing'] = False
+                                        if st.button("Try Again"):
+                                            st.rerun()
+                                
                                 return
 
                             # Process results if we have them
@@ -335,7 +538,52 @@ def main():
                                 else:
                                     st.warning("No valid paper data returned from PubMed")
                     except Exception as e:
-                        st.error(f"Error during search: {str(e)}\nQuery: {final_query if 'final_query' in locals() else 'not constructed'}")
+                        st.error(f"Error during search: {str(e)}")
+                        
+                        # Extract specific error types from the error message
+                        error_msg = str(e)
+                        
+                        # Check for specific error types
+                        if "PhraseNotFound" in error_msg or "FieldNotFound" in error_msg:
+                            st.warning("### Common Query Syntax Issues Detected")
+                            
+                            # Suggest fixes for common errors
+                            if "exp " in final_query:
+                                st.info("**OVID/MEDLINE Syntax Detected:** PubMed doesn't use 'exp' for MeSH terms. Use [Mesh] instead.")
+                                # Display example
+                                st.markdown("**Instead of:** `exp Hydroxymethylglutaryl-CoA Reductase Inhibitors/`")
+                                st.markdown("**Use:** `\"Hydroxymethylglutaryl-CoA Reductase Inhibitors\"[Mesh]`")
+                            
+                            if "[pt]" in final_query.lower():
+                                st.info("**Publication Type Syntax:** Use [Publication Type] instead of [pt]")
+                                st.markdown("**Instead of:** `animal [pt]`")
+                                st.markdown("**Use:** `\"animals\"[MeSH Terms]`")
+                            
+                            if "[tiab]" in final_query:
+                                st.info("**Field Tag Syntax:** Use [Title/Abstract] instead of [tiab]")
+                            
+                            if "/" in final_query and not "http" in final_query:
+                                st.info("**MeSH Term Syntax:** PubMed doesn't use the trailing slash after MeSH terms")
+                                
+                            # Offer a button to automatically convert OVID to PubMed syntax
+                            conversion_col1, conversion_col2 = st.columns([1, 2])
+                            with conversion_col1:
+                                if st.button("🔄 Convert OVID to PubMed", key="convert_ovid_button"):
+                                    try:
+                                        st.info("Converting OVID syntax to PubMed syntax...")
+                                        converted_query = convert_ovid_to_pubmed(final_query)
+                                        update_search_query(converted_query)
+                                    except Exception as conv_e:
+                                        st.error(f"Error converting query: {str(conv_e)}")
+                            with conversion_col2:
+                                st.info("This will update your search query with PubMed-compatible syntax.")
+                            
+                            # Link to PubMed syntax guide
+                            st.markdown("[📚 View PubMed Search Syntax Guide](https://pubmed.ncbi.nlm.nih.gov/help/#syntax)")
+                            
+                            # Show literal query that failed
+                            with st.expander("Full Query Details"):
+                                st.code(final_query)
 
             # Results and Filtering Section
             if st.session_state.unfiltered_df is not None:
@@ -453,6 +701,36 @@ def main():
             st.header("Search Results")
             df_display = st.session_state.filtered_df.copy()
             
+            # Add a prominent Reset All Filters button at the top
+            reset_col1, reset_col2 = st.columns([1, 1])
+            with reset_col1:
+                if st.button("🔄 Reset All Filters", key="reset_all_filters_btn", use_container_width=True, type="primary"):
+                    # Clear AI filter
+                    st.session_state.ai_filtered_pmids = set()
+                    st.session_state.ai_filter_explanations = {}
+                    
+                    # Reset manual filters (year, journal selections)
+                    # Clear all multiselect filters in the left column
+                    for key in list(st.session_state.keys()):
+                        if key.startswith('Filter by') or key.endswith('multiselect'):
+                            st.session_state[key] = []
+                        
+                    # Reset the filtered_df to the original unfiltered state
+                    if st.session_state.unfiltered_df is not None:
+                        st.session_state.filtered_df = st.session_state.unfiltered_df.copy()
+                    
+                    st.success("All filters have been reset!")
+                    st.rerun()
+            
+            # Display articles count
+            with reset_col2:
+                total_articles = len(df_display)
+                if st.session_state.ai_filtered_pmids:
+                    filtered_count = len(st.session_state.ai_filtered_pmids)
+                    st.info(f"Showing {filtered_count} of {total_articles} articles")
+                else:
+                    st.info(f"Showing all {total_articles} articles")
+                    
             # Add AI Filter section
             st.subheader("AI Filter")
             ai_filter_criteria = st.text_area(
@@ -465,6 +743,10 @@ def main():
             if 'ai_filtered_pmids' not in st.session_state:
                 st.session_state.ai_filtered_pmids = set()
             
+            # Initialize AI filter explanations
+            if 'ai_filter_explanations' not in st.session_state:
+                st.session_state.ai_filter_explanations = {}
+            
             if ai_filter_criteria and st.button("Apply AI Filter"):
                 # Check if API key is available
                 if not st.session_state.get('groq_api_key'):
@@ -475,15 +757,29 @@ def main():
                             # Initialize Groq client
                             client = get_groq_client()
                             
-                            # Prepare the filtering prompt
-                            filter_prompt = f"""Analyze the following abstract and determine if it meets this criteria:
+                            # Prepare a more structured filtering prompt that returns JSON
+                            filter_prompt = f"""Analyze the following abstract to determine if it meets this criteria:
 {ai_filter_criteria}
 
-Respond with ONLY 'yes' or 'no'. If there's not enough information in the abstract to determine, respond with 'no'.
+IMPORTANT: Return your analysis as a JSON object with this structure:
+{{
+  "meets_criteria": true/false,
+  "reason": "Brief explanation of why it does or doesn't meet the criteria",
+  "extracted_info": {{
+    "participant_count": number or null,
+    "study_type": "string",
+    "follow_up_period": "string or null"
+  }}
+}}
+
+If you can't determine whether the abstract meets the criteria, set meets_criteria to false.
+If you can't extract specific information, use null for that field.
+Only include factual information directly from the abstract.
 
 Abstract:
 """
                             filtered_pmids = set()
+                            filter_explanations = {}
                             progress_bar = st.progress(0)
                             total_papers = len(df_display)
                             
@@ -493,7 +789,7 @@ Abstract:
                                     messages=[
                                         {
                                             "role": "system",
-                                            "content": "You are a precise scientific paper filter. Analyze abstracts and respond only with 'yes' or 'no' based on the given criteria."
+                                            "content": "You are a scientific abstract analyzer that extracts structured information and determines if studies meet specific criteria. Always respond with valid JSON."
                                         },
                                         {
                                             "role": "user",
@@ -501,18 +797,44 @@ Abstract:
                                         }
                                     ],
                                     model="qwen-qwq-32b",
-                                    max_tokens=10,
                                     temperature=0.1,
                                 )
                                 
-                                response = completion.choices[0].message.content.strip().lower()
-                                if response == 'yes':
-                                    filtered_pmids.add(str(row['pmid']))
+                                # Process the response
+                                response_text = completion.choices[0].message.content.strip()
+                                try:
+                                    # Extract the JSON part if wrapped in markdown code blocks
+                                    if "```json" in response_text:
+                                        response_text = response_text.split("```json")[1].split("```")[0].strip()
+                                    elif "```" in response_text:
+                                        response_text = response_text.split("```")[1].split("```")[0].strip()
+                                    
+                                    import json
+                                    result = json.loads(response_text)
+                                    
+                                    # Store the PMID if it meets criteria
+                                    if result.get("meets_criteria", False):
+                                        pmid = str(row['pmid'])
+                                        filtered_pmids.add(pmid)
+                                        filter_explanations[pmid] = result.get("reason", "Meets criteria")
+                                    else:
+                                        # Store explanation for why it was excluded
+                                        filter_explanations[str(row['pmid'])] = result.get("reason", "Does not meet criteria")
+                                        
+                                except Exception as json_e:
+                                    print(f"Error parsing JSON response for PMID {row['pmid']}: {str(json_e)}")
+                                    print(f"Response text: {response_text}")
+                                    # Fallback to looking for simpler yes/no in the response
+                                    if "true" in response_text.lower() or '"meets_criteria": true' in response_text.lower():
+                                        filtered_pmids.add(str(row['pmid']))
+                                        filter_explanations[str(row['pmid'])] = "Meets criteria (parsed from text)"
                                 
                                 # Update progress bar
                                 progress_bar.progress((idx + 1) / total_papers)
                             
+                            # Store results in session state
                             st.session_state.ai_filtered_pmids = filtered_pmids
+                            st.session_state.ai_filter_explanations = filter_explanations
                             
                             # Show results
                             if filtered_pmids:
@@ -525,8 +847,9 @@ Abstract:
             
             # Add button to clear AI filter
             if st.session_state.ai_filtered_pmids:
-                if st.button("Clear AI Filter"):
+                if st.button("Clear AI Filter", key="clear_ai_filter_btn"):
                     st.session_state.ai_filtered_pmids = set()
+                    st.session_state.ai_filter_explanations = {}
                     st.rerun()
             
             # Group papers by year
@@ -563,6 +886,10 @@ Abstract:
                                         if st.button("❌ Exclude", key=f"exclude_{pmid}"):
                                             st.session_state.excluded_pmids.add(pmid)
                                             st.rerun()
+                                
+                                # Show filter reason if available
+                                if pmid in st.session_state.ai_filter_explanations:
+                                    st.info(f"**Filter match reason:** {st.session_state.ai_filter_explanations[pmid]}")
                                 
                                 # Add a toggle for the abstract
                                 if st.button(f"Toggle Abstract 🔍", key=f"toggle_{row['pmid']}"):
@@ -612,6 +939,10 @@ Abstract:
                                         if st.button("❌ Exclude", key=f"exclude_{pmid}"):
                                             st.session_state.excluded_pmids.add(pmid)
                                             st.rerun()
+                                
+                                # Show filter reason if available
+                                if pmid in st.session_state.ai_filter_explanations:
+                                    st.info(f"**Filter match reason:** {st.session_state.ai_filter_explanations[pmid]}")
                                 
                                 # Add a toggle for the abstract
                                 if st.button(f"Toggle Abstract 🔍", key=f"toggle_{row['pmid']}"):

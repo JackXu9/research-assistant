@@ -3,6 +3,7 @@ import re
 import streamlit as st
 from groq import Groq
 from dotenv import load_dotenv
+from pubmed_utils import validate_mesh_term, convert_ovid_to_pubmed
 
 # Load environment variables
 load_dotenv()
@@ -10,9 +11,24 @@ load_dotenv()
 def get_groq_client():
     """Initialize and return a Groq client."""
     api_key = st.session_state.get('groq_api_key') or os.getenv('GROQ_API_KEY')
+    
     if not api_key:
         raise ValueError("GROQ_API_KEY not found. Please enter your API key in the field above.")
-    return Groq(api_key=api_key)
+    
+    # Simple validation to check if API key looks valid (length check)
+    if len(api_key) < 20:  # Most API keys are longer than this
+        st.warning("The provided API key seems unusually short. Please verify it's correct.")
+    
+    try:
+        # Create and verify the client works by making a simple test call
+        client = Groq(api_key=api_key)
+        
+        # Return the client if successful
+        return client
+    except Exception as e:
+        st.error(f"Error initializing Groq client: {str(e)}")
+        # Return None instead of raising exception to allow for graceful error handling
+        return None
 
 def generate_search_strategy(research_question: str) -> str:
     """Generate a PubMed search strategy using the QwQ-32B model."""
@@ -52,6 +68,119 @@ EXPLANATION:
     response = response.strip()
     
     return response
+
+def validate_search_strategy(strategy_text: str, email: str) -> tuple:
+    """
+    Validates a generated PubMed search strategy by checking each MeSH term 
+    and fixing any issues with non-existent terms.
+    
+    Parameters:
+    -----------
+    strategy_text : str
+        The full text from generate_search_strategy including both the query and explanation
+    email : str
+        Email address for PubMed API validation
+        
+    Returns:
+    --------
+    tuple
+        (validated_strategy_text, validation_notes, was_modified)
+        - validated_strategy_text: The updated strategy text with fixed MeSH terms
+        - validation_notes: List of changes and suggestions
+        - was_modified: Boolean indicating if any changes were made
+    """
+    if not email:
+        return strategy_text, ["Email is required to validate MeSH terms"], False
+    
+    # Extract the search query from the strategy text
+    search_query_match = re.search(r'SEARCH STRATEGY:\s*(.*?)(?:\s*EXPLANATION:|$)', strategy_text, re.DOTALL)
+    if not search_query_match:
+        return strategy_text, ["Could not identify search query in the strategy text"], False
+    
+    original_query = search_query_match.group(1).strip()
+    modified_query = original_query
+    validation_notes = []
+    
+    # First, check if OVID/MEDLINE syntax is used and convert it
+    if any(pattern in original_query for pattern in ['exp ', '/', '[tiab]', '[pt]']):
+        try:
+            modified_query = convert_ovid_to_pubmed(original_query)
+            if modified_query != original_query:
+                validation_notes.append("Converted OVID/MEDLINE syntax to PubMed format")
+        except Exception as e:
+            validation_notes.append(f"Error converting OVID syntax: {str(e)}")
+    
+    # Extract MeSH terms from the query
+    mesh_terms = re.findall(r'"([^"]+)"(?:\s*\[Mesh[^\]]*\])', modified_query)
+    mesh_terms += re.findall(r'([^"\s]+)(?:\s*\[Mesh[^\]]*\])', modified_query)  # Also catch unquoted MeSH terms
+    
+    if not mesh_terms:
+        # No MeSH terms found
+        return strategy_text.replace(original_query, modified_query), ["No MeSH terms found to validate"], original_query != modified_query
+    
+    # Validate each MeSH term
+    was_modified = False
+    for term in mesh_terms:
+        try:
+            is_valid, suggestion = validate_mesh_term(term, email, verify_ssl=False)
+            
+            if not is_valid:
+                was_modified = True
+                if suggestion:
+                    # Replace the invalid term with the suggestion
+                    validation_notes.append(f"Replaced invalid MeSH term '{term}' with '{suggestion}'")
+                    
+                    # Update the query with the new term, preserving the exact format
+                    pattern = re.escape(term) + r"(\s*\[Mesh[^\]]*\])"
+                    modified_query = re.sub(pattern, f'"{suggestion}"\\1', modified_query)
+                else:
+                    # Convert to text search if no suggestion
+                    validation_notes.append(f"Converted invalid MeSH term '{term}' to text search")
+                    
+                    # Replace [Mesh] with [Text Word] or [All Fields]
+                    pattern = r'"?' + re.escape(term) + r'"?\s*\[Mesh[^\]]*\]'
+                    modified_query = re.sub(pattern, f'"{term}"[All Fields]', modified_query)
+        except Exception as e:
+            validation_notes.append(f"Error validating term '{term}': {str(e)}")
+    
+    if not was_modified and original_query != modified_query:
+        was_modified = True
+    
+    # Replace the original query with the validated query in the full strategy text
+    validated_strategy_text = strategy_text.replace(original_query, modified_query)
+    
+    # Add validation summary at the end if changes were made
+    if was_modified:
+        validated_strategy_text += "\n\nVALIDATION NOTES:\n" + "\n".join([f"- {note}" for note in validation_notes])
+    
+    return validated_strategy_text, validation_notes, was_modified
+
+def generate_and_validate_search_strategy(research_question: str, email: str) -> tuple:
+    """
+    Generate and then validate a PubMed search strategy.
+    
+    Parameters:
+    -----------
+    research_question : str
+        The research question to generate a search strategy for
+    email : str
+        Email address for PubMed API validation
+        
+    Returns:
+    --------
+    tuple
+        (validated_strategy, validation_notes, was_modified)
+    """
+    try:
+        # Step 1: Generate the initial search strategy
+        strategy = generate_search_strategy(research_question)
+        
+        # Step 2: Validate and correct MeSH terms
+        validated_strategy, validation_notes, was_modified = validate_search_strategy(strategy, email)
+        
+        return validated_strategy, validation_notes, was_modified
+    except Exception as e:
+        return f"Error generating search strategy: {str(e)}", ["An error occurred"], False
 
 def generate_summary(papers, research_question=None, max_batch_size=10):
     """
