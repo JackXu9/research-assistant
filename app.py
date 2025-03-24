@@ -33,6 +33,11 @@ if 'excluded_pmids' not in st.session_state:
     st.session_state.excluded_pmids = set()
 if 'search_query' not in st.session_state:
     st.session_state.search_query = ""
+# Initialize AI filter related session state
+if 'ai_filtered_pmids' not in st.session_state:
+    st.session_state.ai_filtered_pmids = set()
+if 'ai_filter_explanations' not in st.session_state:
+    st.session_state.ai_filter_explanations = {}
 
 def reset_app():
     """Reset all session state variables except API key and email"""
@@ -56,6 +61,8 @@ def reset_app():
     st.session_state.filtered_df = None
     st.session_state.summary = None
     st.session_state.excluded_pmids = set()
+    st.session_state.ai_filtered_pmids = set()
+    st.session_state.ai_filter_explanations = {}
     
     # Clear specific text input keys
     st.session_state.research_question = ""
@@ -688,9 +695,6 @@ Return ONLY the revised search query with no explanation or additional text."""
                     
                     # Display the formatted summary
                     st.markdown(formatted_summary)
-                    
-                    # Keep the original in a hidden text area for download
-                    st.text_area("Original Summary (for download):", st.session_state.summary, height=1, key="hidden_summary", label_visibility="collapsed")
                 
                 # Ask the Literature section
                 st.header("4. Ask the Literature")
