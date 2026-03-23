@@ -182,7 +182,11 @@ def generate_and_validate_search_strategy(research_question: str, email: str) ->
     except Exception as e:
         return f"Error generating search strategy: {str(e)}", ["An error occurred"], False
 
-def generate_summary(papers, research_question=None, max_batch_size=10):
+def estimate_tokens(text):
+    """Rough token estimate: ~1 token per 4 characters."""
+    return len(text) // 4
+
+def generate_summary(papers, research_question=None, max_batch_size=None):
     """
     Generate a holistic summary of the papers that addresses the research question.
     
@@ -239,7 +243,27 @@ If you need to think through your analysis, enclose your thinking process in <th
 
     try:
         client = get_groq_client()
-        
+
+        # Dynamically calculate max batch size based on context window
+        # qwen/qwen3-32b: 131,072 context, reserve 10,000 for output + 1,000 for prompt overhead
+        CONTEXT_LIMIT = 131072
+        OUTPUT_RESERVE = 10000
+        PROMPT_OVERHEAD = 1000
+        available_input_tokens = CONTEXT_LIMIT - OUTPUT_RESERVE - PROMPT_OVERHEAD
+
+        if max_batch_size is None:
+            # Estimate tokens per paper and calculate how many fit
+            total_tokens = 0
+            max_batch_size = 0
+            for paper in papers:
+                paper_text = f"Title: {paper.get('title', 'No title')}\nAbstract: {paper.get('abstract', 'No abstract')}"
+                paper_tokens = estimate_tokens(paper_text)
+                if total_tokens + paper_tokens > available_input_tokens:
+                    break
+                total_tokens += paper_tokens
+                max_batch_size += 1
+            max_batch_size = max(max_batch_size, 1)  # At least 1 paper
+
         # Try with initial batch size
         current_batch_size = max_batch_size
         success = False
@@ -294,7 +318,7 @@ If you need to think through your analysis, enclose your thinking process in <th
     except Exception as e:
         raise Exception(f"Error generating summary: {str(e)}")
 
-def ask_literature(papers, question: str, max_papers: int = 10) -> str:
+def ask_literature(papers, question: str, max_papers: int = None) -> str:
     """
     Ask a specific question about the provided papers.
     
@@ -315,8 +339,26 @@ def ask_literature(papers, question: str, max_papers: int = 10) -> str:
     if not papers:
         return "No papers provided for analysis."
     
-    # Sort papers by year (newest first) and limit the number
+    # Sort papers by year (newest first)
     sorted_papers = sorted(papers, key=lambda x: x.get('year', '0'), reverse=True)
+
+    # Dynamically calculate how many papers fit in context window
+    if max_papers is None:
+        CONTEXT_LIMIT = 131072
+        OUTPUT_RESERVE = 20000
+        PROMPT_OVERHEAD = 1000
+        available_tokens = CONTEXT_LIMIT - OUTPUT_RESERVE - PROMPT_OVERHEAD
+        total_tokens = 0
+        max_papers = 0
+        for paper in sorted_papers:
+            paper_text = f"Title: {paper.get('title', '')}\nYear: {paper.get('year', '')}\nAbstract: {paper.get('abstract', '')[:300]}"
+            paper_tokens = estimate_tokens(paper_text)
+            if total_tokens + paper_tokens > available_tokens:
+                break
+            total_tokens += paper_tokens
+            max_papers += 1
+        max_papers = max(max_papers, 1)
+
     papers_to_analyze = sorted_papers[:max_papers]
     
     # Function to truncate abstract while keeping important parts
