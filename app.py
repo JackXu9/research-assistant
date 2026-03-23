@@ -275,6 +275,8 @@ def main():
                                     execute_auto_search(query, email, auto_search_progress)
                                 else:
                                     st.error("Could not extract search query from the generated strategy")
+                                    st.write("Debug - Raw strategy response:")
+                                    st.code(validated_strategy)
                             except Exception as e:
                                 st.error(f"Error in search process: {str(e)}")
                         
