@@ -197,8 +197,8 @@ def main():
             
             # Research Question Section
             st.header("1. Define Research Question")
-            research_question = st.text_area(
-                "Enter your research question:", 
+            research_question = st.text_input(
+                "Enter your research question:",
                 key="research_question",
                 placeholder="Example: Is kidney size associated with kidney function?"
             )
@@ -713,7 +713,7 @@ Return ONLY the revised search query with no explanation or additional text."""
                 st.write("Ask a specific question about the selected papers.")
                 
                 # Question input
-                literature_question = st.text_area("Enter your question:", key="literature_question", 
+                literature_question = st.text_input("Enter your question:", key="literature_question",
                                                  placeholder="e.g., What are the most common side effects reported in these studies?")
                 
                 # Create columns for the buttons
@@ -782,9 +782,9 @@ Return ONLY the revised search query with no explanation or additional text."""
                 
             # Add AI Filter section
             st.subheader("AI Filter")
-            ai_filter_criteria = st.text_area(
+            ai_filter_criteria = st.text_input(
                 "Enter filter criteria for the AI to analyze abstracts:",
-                placeholder="Example: studies including populations more than 20 participants\nor: randomized controlled trials with follow-up > 6 months",
+                placeholder="Example: studies with more than 20 participants, or RCTs with follow-up > 6 months",
                 help="The AI will analyze each abstract based on your criteria and filter the results accordingly."
             )
             
