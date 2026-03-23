@@ -834,35 +834,39 @@ Abstract:
                             progress_bar = st.progress(0)
                             total_papers = len(df_display)
                             
-                            for idx, row in df_display.iterrows():
+                            for i, (idx, row) in enumerate(df_display.iterrows()):
                                 # Create completion for each abstract
-                                completion = client.chat.completions.create(
-                                    messages=[
-                                        {
-                                            "role": "system",
-                                            "content": "You are a scientific abstract analyzer that extracts structured information and determines if studies meet specific criteria. Always respond with valid JSON."
-                                        },
-                                        {
-                                            "role": "user",
-                                            "content": filter_prompt + row['abstract']
-                                        }
-                                    ],
-                                    model="qwen/qwen3-32b",
-                                    temperature=0.1,
-                                )
-                                
-                                # Process the response
-                                response_text = completion.choices[0].message.content.strip()
                                 try:
+                                    completion = client.chat.completions.create(
+                                        messages=[
+                                            {
+                                                "role": "system",
+                                                "content": "You are a scientific abstract analyzer that extracts structured information and determines if studies meet specific criteria. Always respond with valid JSON. Do not include any thinking process."
+                                            },
+                                            {
+                                                "role": "user",
+                                                "content": filter_prompt + row['abstract']
+                                            }
+                                        ],
+                                        model="qwen/qwen3-32b",
+                                        temperature=0.1,
+                                    )
+
+                                    # Process the response
+                                    response_text = completion.choices[0].message.content.strip()
+
+                                    # Remove <think> tags from qwen3 model
+                                    response_text = re.sub(r'<think>.*?</think>\s*', '', response_text, flags=re.DOTALL).strip()
+
                                     # Extract the JSON part if wrapped in markdown code blocks
                                     if "```json" in response_text:
                                         response_text = response_text.split("```json")[1].split("```")[0].strip()
                                     elif "```" in response_text:
                                         response_text = response_text.split("```")[1].split("```")[0].strip()
-                                    
+
                                     import json
                                     result = json.loads(response_text)
-                                    
+
                                     # Store the PMID if it meets criteria
                                     if result.get("meets_criteria", False):
                                         pmid = str(row['pmid'])
@@ -871,17 +875,19 @@ Abstract:
                                     else:
                                         # Store explanation for why it was excluded
                                         filter_explanations[str(row['pmid'])] = result.get("reason", "Does not meet criteria")
-                                        
-                                except Exception as json_e:
-                                    print(f"Error parsing JSON response for PMID {row['pmid']}: {str(json_e)}")
-                                    print(f"Response text: {response_text}")
-                                    # Fallback to looking for simpler yes/no in the response
-                                    if "true" in response_text.lower() or '"meets_criteria": true' in response_text.lower():
-                                        filtered_pmids.add(str(row['pmid']))
-                                        filter_explanations[str(row['pmid'])] = "Meets criteria (parsed from text)"
-                                
-                                # Update progress bar
-                                progress_bar.progress((idx + 1) / total_papers)
+
+                                except Exception as paper_e:
+                                    print(f"Error processing PMID {row.get('pmid', 'unknown')}: {str(paper_e)}")
+                                    # Fallback: try to parse from raw text
+                                    try:
+                                        if "true" in str(paper_e).lower() or (response_text and ("true" in response_text.lower() or '"meets_criteria": true' in response_text.lower())):
+                                            filtered_pmids.add(str(row['pmid']))
+                                            filter_explanations[str(row['pmid'])] = "Meets criteria (parsed from text)"
+                                    except:
+                                        pass
+
+                                # Update progress bar (clamp to [0.0, 1.0])
+                                progress_bar.progress(min((i + 1) / total_papers, 1.0))
                             
                             # Store results in session state
                             st.session_state.ai_filtered_pmids = filtered_pmids
@@ -1042,8 +1048,8 @@ def execute_auto_search(query, email, progress_bar=None):
         
         # Update progress
         if progress_bar:
-            progress_bar.progress(0.3 + (0.7 * st.session_state.auto_search_state["current_iteration"] / st.session_state.auto_search_state["max_iterations"]))
-        
+            progress_bar.progress(min(0.3 + (0.7 * st.session_state.auto_search_state["current_iteration"] / st.session_state.auto_search_state["max_iterations"]), 1.0))
+
         # Check if we got any results
         if count > 0:
             # Success - we have results
@@ -1216,7 +1222,7 @@ Return ONLY the corrected search query with no explanation or additional text.""
         
         # Update progress bar
         if progress_bar:
-            progress_bar.progress(0.3 + (0.7 * (st.session_state.auto_search_state["current_iteration"] - 1) / st.session_state.auto_search_state["max_iterations"]))
+            progress_bar.progress(min(0.3 + (0.7 * (st.session_state.auto_search_state["current_iteration"] - 1) / st.session_state.auto_search_state["max_iterations"]), 1.0))
         
         # Execute the refined search
         st.info(f"Trying refined query (Attempt {st.session_state.auto_search_state['current_iteration']} of {st.session_state.auto_search_state['max_iterations']})")
