@@ -647,9 +647,12 @@ Return ONLY the revised search query with no explanation or additional text."""
             if st.session_state.unfiltered_df is not None:
                 st.header("3. Generate Summary")
                 
-                # Get non-excluded papers
+                # Get non-excluded papers, respecting AI filter if active
                 included_df = st.session_state.filtered_df[~st.session_state.filtered_df['pmid'].isin(st.session_state.excluded_pmids)]
+                if st.session_state.ai_filtered_pmids:
+                    included_df = included_df[included_df['pmid'].astype(str).isin(st.session_state.ai_filtered_pmids)]
                 
+                st.caption(f"Will summarize {len(included_df)} papers")
                 if st.button("Generate Summary", use_container_width=True):
                     if not included_df.empty:
                         with st.spinner("Generating summary..."):
@@ -724,7 +727,10 @@ Return ONLY the revised search query with no explanation or additional text."""
                         if st.session_state.filtered_df is not None and not st.session_state.filtered_df.empty:
                             with st.spinner("Analyzing literature..."):
                                 try:
-                                    papers_to_analyze = st.session_state.filtered_df.to_dict('records')
+                                    ask_df = st.session_state.filtered_df[~st.session_state.filtered_df['pmid'].isin(st.session_state.excluded_pmids)]
+                                    if st.session_state.ai_filtered_pmids:
+                                        ask_df = ask_df[ask_df['pmid'].astype(str).isin(st.session_state.ai_filtered_pmids)]
+                                    papers_to_analyze = ask_df.to_dict('records')
                                     answer = ask_literature(papers_to_analyze, literature_question)
                                     st.session_state.literature_answer = answer
                                 except Exception as e:
