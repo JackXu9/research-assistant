@@ -203,8 +203,8 @@ def main():
                 placeholder="Example: Is kidney size associated with kidney function?"
             )
             
-            if research_question:
-                if st.button("Search PubMed", type="primary"):
+            if st.button("Search PubMed", type="primary", disabled=not research_question):
+                if research_question:
                     if not email:
                         st.error("Please enter your email address (required for PubMed)")
                     elif not st.session_state.get('groq_api_key'):
@@ -720,10 +720,8 @@ Return ONLY the revised search query with no explanation or additional text."""
                 ask_col1, ask_col2 = st.columns([0.7, 0.3])
                 
                 with ask_col1:
-                    if st.button("Ask Question", use_container_width=True):
-                        if not literature_question:
-                            st.warning("Please enter a question first.")
-                        elif st.session_state.filtered_df is not None and not st.session_state.filtered_df.empty:
+                    if st.button("Ask Question", use_container_width=True, disabled=not literature_question):
+                        if st.session_state.filtered_df is not None and not st.session_state.filtered_df.empty:
                             with st.spinner("Analyzing literature..."):
                                 try:
                                     papers_to_analyze = st.session_state.filtered_df.to_dict('records')
@@ -798,7 +796,7 @@ Return ONLY the revised search query with no explanation or additional text."""
             if 'ai_filter_explanations' not in st.session_state:
                 st.session_state.ai_filter_explanations = {}
             
-            if ai_filter_criteria and st.button("Apply AI Filter"):
+            if st.button("Apply AI Filter", disabled=not ai_filter_criteria):
                 # Check if API key is available
                 if not st.session_state.get('groq_api_key'):
                     st.error("Please enter your Groq API key at the top of the page to use the AI filter.")
