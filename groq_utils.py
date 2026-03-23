@@ -45,7 +45,7 @@ EXPLANATION:
 [2-3 sentence explanation]"""
     
     completion = client.chat.completions.create(
-        model="qwen-qwq-32b",
+        model="qwen/qwen3-32b",
         messages=[
             {
                 "role": "system",
@@ -261,7 +261,7 @@ If you need to think through your analysis, enclose your thinking process in <th
                             "content": context
                         }
                     ],
-                    model="qwen-qwq-32b",
+                    model="qwen/qwen3-32b",
                     max_tokens=10000,  
                     temperature=0.2,
                 )
@@ -366,7 +366,7 @@ If you need to think through your analysis, enclose your thinking process in <th
                     "content": context
                 }
             ],
-            model="qwen-qwq-32b",
+            model="qwen/qwen3-32b",
             max_tokens=20000, 
             temperature=0.2,
         )

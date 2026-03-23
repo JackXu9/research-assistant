@@ -20,6 +20,16 @@ import traceback
 # Load environment variables
 load_dotenv()
 
+# Initialize session state from .env if available
+if 'groq_api_key' not in st.session_state:
+    env_key = os.getenv('GROQ_API_KEY', '')
+    if env_key:
+        st.session_state.groq_api_key = env_key
+if 'email' not in st.session_state:
+    env_email = os.getenv('PUBMED_EMAIL', '')
+    if env_email:
+        st.session_state.email = env_email
+
 # Initialize session state
 if 'search_manager' not in st.session_state:
     st.session_state.search_manager = SearchManager()
@@ -181,9 +191,9 @@ def main():
                 if groq_api_key:
                     st.session_state.groq_api_key = groq_api_key
                     os.environ["GROQ_API_KEY"] = groq_api_key
-            
+
             with col2:
-                email = st.text_input("Enter your email (required for PubMed):", key="email")
+                email = st.text_input("Enter your email (required for PubMed):", key="email_input")
             
             # Research Question Section
             st.header("1. Define Research Question")
@@ -322,7 +332,7 @@ Return ONLY the revised search query with no explanation or additional text."""
                                                             "content": widen_prompt
                                                         }
                                                     ],
-                                                    model="qwen-qwq-32b",
+                                                    model="qwen/qwen3-32b",
                                                     temperature=0.2,
                                                 )
                                                 
@@ -419,7 +429,7 @@ Return ONLY the revised search query with no explanation or additional text."""
                                                             "content": narrow_prompt
                                                         }
                                                     ],
-                                                    model="qwen-qwq-32b",
+                                                    model="qwen/qwen3-32b",
                                                     temperature=0.2,
                                                 )
                                                 
@@ -835,7 +845,7 @@ Abstract:
                                             "content": filter_prompt + row['abstract']
                                         }
                                     ],
-                                    model="qwen-qwq-32b",
+                                    model="qwen/qwen3-32b",
                                     temperature=0.1,
                                 )
                                 
@@ -1174,7 +1184,7 @@ Return ONLY the corrected search query with no explanation or additional text.""
                     "content": refinement_prompt
                 }
             ],
-            model="qwen-qwq-32b",
+            model="qwen/qwen3-32b",
             temperature=0.2,
         )
         
